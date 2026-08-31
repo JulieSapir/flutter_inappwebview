@@ -305,6 +305,21 @@ void InAppWebView::DeliverSnapshot(cairo_surface_t* surface) {
     return;
   }
 
+  // fps 打点（debug）：每 5s 汇报 snapshot 实际出帧率（节拍器上限 + 防重入
+  // 降速的实测证据，与 GPU 直通管线的 present fps 对比用）
+  snapshot_fps_frames_++;
+  {
+    int64_t now = g_get_monotonic_time();
+    if (snapshot_fps_start_us_ == 0) {
+      snapshot_fps_start_us_ = now;
+    } else if (now - snapshot_fps_start_us_ >= 5000000) {
+      debugLog("InAppWebView(gtk): snapshot fps=" +
+               std::to_string(snapshot_fps_frames_ * 1000000 / (now - snapshot_fps_start_us_)));
+      snapshot_fps_start_us_ = now;
+      snapshot_fps_frames_ = 0;
+    }
+  }
+
   // [debug] 出图尺寸 vs 两级 allocation vs 逻辑尺寸，验证 GtkBin 传导链路
   {
     static uint32_t last_w = 0, last_h = 0;

@@ -16,21 +16,32 @@ flutter_inappwebview_linux 支持两个 WebKit 后端，构建时二选一：
 
 ### 架构说明
 
-| 能力                     | 实现方式                                                                                                                                   |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| InAppWebView widget 渲染 | `webkit_web_view_get_snapshot()`（VISIBLE region）→ cairo ARGB32 → SIMD BGRA→RGBA（`simd_convert.h`）→ 共享三缓冲 → `FlPixelBufferTexture` |
-| 帧驱动                   | 50ms 节拍器（WebKitGTK 无 per-frame 回调），`snapshot_pending_` 防重入自动节流                                                             |
-| 输入                     | Flutter 指针/滚轮/键盘事件合成 GdkEvent → `gtk_widget_event()`                                                                             |
-| 离屏宿主                 | `GtkOffscreenWindow`（widget 可 realize/渲染/收事件，不上屏）                                                                              |
-| InAppBrowser             | webview widget 直接挂入浏览器窗口（原生渲染/输入/IME，无纹理中转）                                                                         |
-| Headless                 | 复用离屏宿主，不注册纹理                                                                                                                   |
+| 能力                     | 实现方式                                                                                                                                                                                                                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| InAppWebView widget 渲染 | **GPU 直通**（默认，能力探测自动启用）：XComposite redirect + Damage 驱动 + `NameWindowPixmap` 别名 + `EGL_KHR_image_pixmap` 零拷贝导入引擎纹理；不满足时回退 **snapshot 管线**：`webkit_web_view_get_snapshot()`（VISIBLE）→ cairo ARGB32 → SIMD BGRA→RGBA → 共享三缓冲 → `FlPixelBufferTexture` |
+| 帧驱动                   | GPU 直通：Damage 驱动（页面变才出帧，实测跟随页面更新率直至刷新率上限）；snapshot 回退：50ms 节拍器 + `snapshot_pending_` 防重入自动节流                                                                                                                                                          |
+| 输入                     | Flutter 指针/滚轮/键盘事件合成 GdkEvent → `gtk_widget_event()`                                                                                                                                                                                                                                    |
+| 离屏宿主                 | GPU 直通：override-redirect popup 定位屏外（需真实 X 窗口供捕获）；snapshot：`GtkOffscreenWindow`                                                                                                                                                                                                 |
+| InAppBrowser             | webview widget 直接挂入浏览器窗口（原生渲染/输入/IME，无纹理中转）                                                                                                                                                                                                                                |
+| Headless                 | 复用离屏宿主，不注册纹理                                                                                                                                                                                                                                                                          |
+
+### GPU 直通 vs snapshot 实测（i915 / 60Hz / flutter.dev / 1280x204）
+
+| 指标                | GPU 直通                      | snapshot 回退                        |
+| ------------------- | ----------------------------- | ------------------------------------ |
+| 滚动帧率            | **60fps**（打满刷新率，3.2×） | 19fps（节拍器上限钉死）              |
+| 滚动 CPU（flutter） | 0.4%                          | 0.2-0.4%（持平）                     |
+| 静态页 idle         | 零 present（零功耗）          | 20fps 节拍器永动机（读回+转换+上传） |
+| 动画页 idle         | 跟随页面变化率（如 52fps）    | 仍 19fps（欠采样，肉眼可见卡顿）     |
+
+GPU 直通启用条件（`WebKitGpuCapture::IsSupported`）：X11 + XComposite/XDamage 扩展 + `EGL_KHR_image_pixmap`。Wayland、Xvfb（无 DRI3，实测 `LIBGL_ALWAYS_SOFTWARE=1` 亦无效）自动回退 snapshot。可用 `FLUTTER_INAPPWEBVIEW_LINUX_GPU_CAPTURE=0` 强制回退。
 
 ### 已知限制（显式声明）
 
 - `SendTouchEvent` 不支持（GTK3 无法合成 `GdkEventSequence`）
 - `requestPointerLock/Unlock` 返回 false（WebKitGTK 无公开 API）
 - ITP（`itpEnabled`）无 API 支持（宏短路为 no-op）
-- snapshot 为 GPU→CPU 路径，性能上限低于 WPE 的 DMA-BUF zero-copy；高帧率场景请关注 Phase 4 benchmark
+- snapshot 回退路径为 GPU→CPU 读回，性能上限低于 GPU 直通（高帧率场景请确保 GPU 直通启用，条件见上表）
 - `WebResourceErrorType` 契约层无 Linux native value 映射（platform_interface 缺口），onReceivedError 的 error.type 降级为 IO，完整信息在 description
 
 ### 安装与使用
@@ -50,6 +61,7 @@ cd linux && cmake -DFLUTTER_INAPPWEBVIEW_LINUX_BACKEND=wpe ...
 
 ### 修订记录
 
+- 2026-08：GPU 直通管线成为默认（XComposite+Damage+EGLImage 零拷贝，实测帧率 3.2×）；present 稳态零 X 往返（尺寸缓存 scale-aware）；fps debug 打点；snapshot 降级为回退路径
 - 2026-08：新增 WebKitGTK 后端（`HAVE_WEBKIT_GTK`，默认）；WPE 降级为可选编译开关。渲染/输入适配实现在 `in_app_webview_gtk.cc`，API 差异收敛在 `webkit_include.h`（NetworkSession→WebContext、WebKitRectangle→GdkRectangle、WebKitColor→GdkRGBA、get_snapshot 老签名等）。
 
 ---

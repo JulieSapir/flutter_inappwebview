@@ -2853,12 +2853,35 @@ void InAppWebView::setSize(int width, int height) {
   }
 #elif defined(HAVE_WEBKIT_GTK)
   if (gtk_host_window_ != nullptr) {
-    gtk_window_resize(gtk_host_window_, width_, height_);
+    // 两种宿主走不同 resize 路径（单写入者原则）：
+    //  - GtkOffscreenWindow（snapshot）：无 X 窗口语义，依赖 GTK 机器 +
+    //    手动 size_allocate（见 InitGtkHost RCA 注释）。
+    //  - GTK_WINDOW_POPUP（GPU 直通）：有真实 X 窗口，走 gdk 直接写入。
+    const bool offscreen_host = GTK_IS_OFFSCREEN_WINDOW(gtk_host_window_) != FALSE;
+    if (offscreen_host) {
+      gtk_window_resize(gtk_host_window_, width_, height_);
+    }
     // 直接分配宿主窗口本身（GtkBin 正常传导链路）。对 webview widget 手动
     // size_allocate 会被 GTK 主循环用宿主 1x1 allocation 覆盖（见 InitGtkHost
     // 注释中的 RCA），导致 snapshot 出图退化为 1x1。
     GtkAllocation win_alloc = {0, 0, width_, height_};
     gtk_widget_size_allocate(GTK_WIDGET(gtk_host_window_), &win_alloc);
+    if (!offscreen_host) {
+      // GPU 直通：宿主 X 窗口必须与 webview 子窗口同步 resize，否则 X11 子窗口
+      // 渲染被祖先裁剪（实证：宿主卡旧尺寸时内容被裁切 + 未初始化显存噪声；
+      // 外部把宿主改到新尺寸后画面立即痊愈，且 WebKit 早已按新尺寸重排完毕，
+      // 纯裁剪问题）。gtk_window_resize 依赖 GTK 异步 size 机器，与上面的手动
+      // size_allocate 存在竞态——GTK 见 allocation 已等于请求值会跳过
+      // XResizeWindow，宿主卡在旧尺寸（交互式连续 resize 时必现）。直接对
+      // GdkWindow 下发 move_resize 确定生效（单一写入者，避免 GTK 把陈旧
+      // default_size 又拍回去），并顺带重钉屏外定位（尺寸变大时右下角可能
+      // 进入屏幕）。
+      GdkWindow* host_gdk = gtk_widget_get_window(GTK_WIDGET(gtk_host_window_));
+      if (host_gdk != nullptr) {
+        gdk_window_move_resize(host_gdk, -(2 * width_ + 256), -(2 * height_ + 256), width_,
+                               height_);
+      }
+    }
   }
   RequestSnapshot();
 #elif defined(HAVE_WPE_BACKEND_LEGACY)

@@ -7,6 +7,7 @@
 #include <epoxy/gl.h>
 #include <gdk/gdkx.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <mutex>
@@ -62,7 +63,11 @@ struct DamageSource {
   GPollFD pfd{};
   Display* dpy = nullptr;
   int damage_event_base = 0;
-  std::function<void()> on_damage;  // 主线程回调（已聚合）
+  uint32_t last_w = 0, last_h = 0;         // 最后一条 damage 事件的 drawable 几何
+  int32_t bbox_min_x = 0, bbox_min_y = 0;  // 本批 damage 区域包围盒（未累计时 max<min）
+  int32_t bbox_max_x = -1, bbox_max_y = -1;
+  // (drawable w, h, 本批包围盒是否覆盖全 drawable)
+  std::function<void(uint32_t, uint32_t, bool)> on_damage;  // 主线程回调（已聚合）
 };
 
 gboolean DamageSourcePrepare(GSource* source, gint* timeout) {
@@ -78,17 +83,40 @@ gboolean DamageSourceCheck(GSource* source) {
 
 gboolean DamageSourceDispatch(GSource* source, GSourceFunc, gpointer) {
   auto* s = reinterpret_cast<DamageSource*>(source);
-  // 抽干全部 damage 事件再回调一次（天然聚合高刷动画的连续 damage）
+  // 抽干全部 damage 事件再回调一次（天然聚合高刷动画的连续 damage）；
+  // 记录最后一条事件的 drawable 几何：尺寸与该帧 backing 内容同源（服务端
+  // 生成 damage 时的窗口真值），resize 过渡期不会拿旧尺寸配新 pixmap。
+  // 同时累计本批 damage 区域包围盒：resize 后 WebKit 的全幅重绘以
+  // 「包围盒覆盖全 drawable」为标志。
   XEvent ev;
   bool got_damage = false;
   while (XPending(s->dpy) > 0) {
     XNextEvent(s->dpy, &ev);
     if (ev.type == s->damage_event_base + XDamageNotify) {
+      auto* dev = reinterpret_cast<XDamageNotifyEvent*>(&ev);
+      const int32_t x2 = int32_t(dev->area.x) + dev->area.width;
+      const int32_t y2 = int32_t(dev->area.y) + dev->area.height;
+      if (s->bbox_max_x < s->bbox_min_x) {  // 本批第一条
+        s->bbox_min_x = dev->area.x;
+        s->bbox_min_y = dev->area.y;
+      } else {
+        s->bbox_min_x = std::min(s->bbox_min_x, int32_t(dev->area.x));
+        s->bbox_min_y = std::min(s->bbox_min_y, int32_t(dev->area.y));
+      }
+      s->bbox_max_x = std::max(s->bbox_max_x, x2);
+      s->bbox_max_y = std::max(s->bbox_max_y, y2);
+      s->last_w = dev->geometry.width;
+      s->last_h = dev->geometry.height;
       got_damage = true;
     }
   }
   if (got_damage && s->on_damage) {
-    s->on_damage();
+    const bool covers_full = (s->bbox_max_x - s->bbox_min_x) >= int32_t(s->last_w) &&
+                             (s->bbox_max_y - s->bbox_min_y) >= int32_t(s->last_h);
+    // 复位包围盒，供下一批累计
+    s->bbox_max_x = -1;
+    s->bbox_max_y = -1;
+    s->on_damage(s->last_w, s->last_h, covers_full);
   }
   return G_SOURCE_CONTINUE;
 }
@@ -123,6 +151,11 @@ struct WebKitGpuCapture::Impl {
 
   std::function<void()> on_frame_available;
   int64_t last_present_us = 0;             // present 节流（上限 ~125Hz）
+  int64_t fps_window_start_us = 0;         // fps 打点窗口起点（0=未开始）
+  uint32_t fps_frames = 0;                 // 窗口内 present 次数
+  bool awaiting_full_repaint = false;      // resize 后等待 WebKit 全幅重绘
+  uint32_t await_w = 0, await_h = 0;       // 等待中的目标几何
+  int64_t await_start_us = 0;              // 几何变化时刻（超时兜底）
   int import_failures = 0;                 // 连续导入失败计数（用于一次性响亮日志）
   EGLDisplay engine_dpy = EGL_NO_DISPLAY;  // 首次导入时缓存的引擎显示句柄
 
@@ -261,7 +294,9 @@ void WebKitGpuCapture::SetOnFrameAvailable(std::function<void()> callback) {
   }
   auto* ds = reinterpret_cast<DamageSource*>(impl_->source);
   if (ds != nullptr) {
-    ds->on_damage = [this]() { PresentOnce(); };
+    ds->on_damage = [this](uint32_t w, uint32_t h, bool covers_full) {
+      PresentOnce(w, h, covers_full);
+    };
   }
   impl_->on_frame_available = std::move(callback);
   // 消费者接入立即补首帧
@@ -313,7 +348,7 @@ void WebKitGpuCapture::Stop() {
   debugLog("WebKitGpuCapture: stopped");
 }
 
-void WebKitGpuCapture::PresentOnce() {
+void WebKitGpuCapture::PresentOnce(uint32_t ev_w, uint32_t ev_h, bool ev_covers_full) {
   if (impl_ == nullptr || !active_ || !impl_->on_frame_available) {
     return;
   }
@@ -337,9 +372,15 @@ void WebKitGpuCapture::PresentOnce() {
     }
   }
 
-  // 取当前 backing 的服务端别名（redirect 持续期间内容随渲染实时更新）
-  uint32_t w = 0, h = 0;
-  {
+  // 尺寸来源：damage 事件自带的 drawable 几何（服务端真值，与该帧 backing
+  // 内容生成时的窗口尺寸严格配对，稳态零往返）。ev 为 0 时（接线补首帧 /
+  // resize 后强制补帧，无 damage 事件可查）退化为一次 XGetGeometry 取当前真值。
+  // 注意不能用 GTK allocation 推断：GTK 端 allocation 更新与 X 服务端窗口
+  // resize 分属两条连接、非原子，resize 过渡期会拿旧尺寸配新 pixmap（实测
+  // 表现为拖拽窗口时画面拉伸/花屏）。
+  uint32_t w = ev_w;
+  uint32_t h = ev_h;
+  if (w == 0 || h == 0) {
     ScopedXErrors guard(impl_->dpy);
     Window root = 0;
     int x = 0, y = 0;
@@ -349,20 +390,63 @@ void WebKitGpuCapture::PresentOnce() {
         gw == 0 || gh == 0 || guard.count() > 0) {
       return;
     }
-    Pixmap px = XCompositeNameWindowPixmap(impl_->dpy, impl_->webview_xwin);
+    w = gw;
+    h = gh;
+  }
+  Pixmap px;
+  {
+    ScopedXErrors guard(impl_->dpy);
+    px = XCompositeNameWindowPixmap(impl_->dpy, impl_->webview_xwin);
     if (px == 0 || guard.count() > 0) {
       return;
     }
-    w = gw;
-    h = gh;
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (impl_->pending_pixmap != 0) {
-      impl_->free_queue.push_back(impl_->pending_pixmap);  // 未被消费，直接回收
-    }
-    impl_->pending_pixmap = px;
-    impl_->pending_w = w;
-    impl_->pending_h = h;
   }
+  // resize 脏帧守门：几何与上次 present 不同 = backing 刚被服务端重分配，
+  // 此时帧的内容只有旧尺寸区域有效，其余是未初始化显存（实测拖拽中出现
+  // 脏块）。跳过几何变化后的首个 damage（服务端 resize 自带的全幅 damage），
+  // 等 WebKit 对新尺寸的重绘（包围盒覆盖全 drawable）再恢复 present；等待
+  // 期间引擎沿用旧帧（轻微拉伸，远好于脏块）。几何再变（拖拽连续步进）则
+  // 刷新目标继续等。250ms 兜底：部分重绘场景不至永久卡旧帧。
+  // 注意：等待期间 pending 仍为旧值，后续事件依旧满足「几何≠pending」，
+  // 必须用 await_w/h 判定是否已在等同一目标尺寸，否则全幅重绘帧永远进不了
+  // 放行分支（实测死锁：首帧永无落地，no frame yet 刷屏）。
+  const bool resized_since_present = (impl_->pending_w != w || impl_->pending_h != h);
+  const bool awaiting_this_size =
+      impl_->awaiting_full_repaint && impl_->await_w == w && impl_->await_h == h;
+  if (resized_since_present && !awaiting_this_size) {
+    impl_->awaiting_full_repaint = true;
+    impl_->await_w = w;
+    impl_->await_h = h;
+    impl_->await_start_us = now;
+    return;
+  }
+  if (impl_->awaiting_full_repaint) {
+    if (!ev_covers_full && now - impl_->await_start_us < 250000) {
+      return;  // 未见全幅重绘且未超时，继续等
+    }
+    impl_->awaiting_full_repaint = false;
+  }
+  // fps 打点（debug）：每 5s 汇报实际出帧速率（过守门后的真实交付帧）
+  impl_->fps_frames++;
+  if (impl_->fps_window_start_us == 0) {
+    impl_->fps_window_start_us = now;
+  } else if (now - impl_->fps_window_start_us >= 5000000) {
+    debugLog("WebKitGpuCapture: present fps=" +
+             std::to_string(impl_->fps_frames * 1000000 / (now - impl_->fps_window_start_us)));
+    impl_->fps_window_start_us = now;
+    impl_->fps_frames = 0;
+  }
+  // 尺寸变化打点（debug）：resize 诊断（对照 snapshot 路径的尺寸日志）
+  if (w != impl_->pending_w || h != impl_->pending_h) {
+    debugLog("WebKitGpuCapture: present size " + std::to_string(w) + "x" + std::to_string(h));
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (impl_->pending_pixmap != 0) {
+    impl_->free_queue.push_back(impl_->pending_pixmap);  // 未被消费，直接回收
+  }
+  impl_->pending_pixmap = px;
+  impl_->pending_w = w;
+  impl_->pending_h = h;
   impl_->on_frame_available();
 }
 

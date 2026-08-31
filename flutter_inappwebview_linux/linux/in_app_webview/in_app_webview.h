@@ -545,8 +545,10 @@ class InAppWebView {
   std::unique_ptr<WebKitGpuCapture> gpu_capture_ = nullptr;
 
   // Snapshot scheduling state (GTK main thread only)
-  bool snapshot_pending_ = false;  // true while an async snapshot is in flight
-  bool snapshot_dirty_ = true;     // set when content changed and a snapshot is needed
+  bool snapshot_pending_ = false;      // true while an async snapshot is in flight
+  bool snapshot_dirty_ = true;         // set when content changed and a snapshot is needed
+  int64_t snapshot_fps_start_us_ = 0;  // fps 打点窗口起点（0=未开始）
+  uint32_t snapshot_fps_frames_ = 0;   // 窗口内成功交付的 snapshot 帧数
 
   // GTK signal handlers
   gulong gtk_scale_handler_id_ = 0;         // notify::scale-factor on the webview widget

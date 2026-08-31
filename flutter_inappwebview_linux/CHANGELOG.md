@@ -1,5 +1,28 @@
 ## 0.2.0-beta.2
 
+- 新增 **GPU 直通渲染管线**（默认，能力探测自动启用）：XComposite redirect +
+  Damage 驱动 + `XCompositeNameWindowPixmap` 别名 + `EGL_KHR_image_pixmap`
+  零拷贝导入引擎纹理（`webkit_gpu_capture.cc`）。实测（i915 / 60Hz /
+  flutter.dev / 1280x204）：滚动帧率 19fps → **60fps（3.2×）**，CPU 持平
+  （≤0.4%）；静态页 idle 零 present；动画页跟随页面实际变化率。不满足条件
+  （Wayland / Xvfb / 无 EGL pixmap import）自动回退 snapshot 管线；
+  `FLUTTER_INAPPWEBVIEW_LINUX_GPU_CAPTURE=0` 可强制回退
+- GPU present 稳态零 X 往返：尺寸直接取 damage 事件自带的 drawable 几何
+  （服务端真值，与该帧 backing 内容严格同源）；接线补首帧/resize 强制补帧时
+  才退化为单次 `XGetGeometry`。修复 resize 时画面拉伸/花屏（原 allocation
+  缓存推断与 X 服务端 resize 分属两条连接非原子，过渡期旧尺寸配新 pixmap）
+- 修复 resize 时 popup 宿主 X 窗口卡旧尺寸导致的内容裁切 + 未初始化显存
+  噪声（`gtk_window_resize` 与手动 `size_allocate` 竞态跳过 `XResizeWindow`，
+  X11 子窗口被祖先裁剪）：popup 宿主改走 `gdk_window_move_resize` 单写入者
+  确定生效，并随尺寸重钉屏外定位；`gtk_window_resize` 仅保留给
+  GtkOffscreenWindow（snapshot 路径）
+- 修复拖拽过程中脏区域被渲染：几何变化后跳过服务端 resize 自带的全幅
+  damage 帧（此时 backing 仅旧尺寸区域有效），等 WebKit 全幅重绘（damage
+  包围盒覆盖全 drawable）再 present，250ms 兜底；期间引擎沿用旧帧
+- 新增尺寸变化打点（debug）：`present size WxH`，resize 诊断与 damage 几何
+  真值实证；fps 打点统计守门后真实交付帧
+- 新增 fps debug 打点（每 5s 惰性窗口）：GPU `present fps=N` / snapshot
+  `snapshot fps=N`，供 `scripts/bench_render.sh` 基准对比
 - 修复右键菜单 segfault：WebKitGTK 4.1 的 `context-menu` 信号自 2.40 起在
   `context_menu` 与 `hit_test_result` 之间插入了 `GdkEvent*` 参数，旧 4 参回调
   导致 `hit_test_result` 被读进 `user_data` 槽（`self` 悬空），右键即崩溃。

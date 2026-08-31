@@ -62,7 +62,11 @@ class WebKitGpuCapture {
   void SetOnFrameAvailable(std::function<void()> callback);
 
   // 强制取当前内容别名并入队一帧（resize/scale 变化后由 RequestSnapshot 调用）。
-  void PresentOnce();
+  // ev_w/ev_h：damage 事件自带的 drawable 几何（服务端真值，与该帧 backing
+  // 内容严格同源）；传 0 时退化为一次 XGetGeometry 取当前真值。
+  // ev_covers_full：本批 damage 区域包围盒是否覆盖整个 drawable（WebKit 对
+  // 新尺寸的全幅重绘标志）。
+  void PresentOnce(uint32_t ev_w = 0, uint32_t ev_h = 0, bool ev_covers_full = false);
 
   // === 引擎 raster 线程（FlTextureGL::populate）===
 
