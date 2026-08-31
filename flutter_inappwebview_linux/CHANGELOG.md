@@ -1,3 +1,15 @@
+## 0.2.0-beta.2
+
+- 修复右键菜单 segfault：WebKitGTK 4.1 的 `context-menu` 信号自 2.40 起在
+  `context_menu` 与 `hit_test_result` 之间插入了 `GdkEvent*` 参数，旧 4 参回调
+  导致 `hit_test_result` 被读进 `user_data` 槽（`self` 悬空），右键即崩溃。
+  `OnContextMenu` 在 `HAVE_WEBKIT_GTK` 分支下对齐新签名
+  (`in_app_webview.cc`/`in_app_webview.h`)
+- 修复 `<select>` 下拉菜单 segfault：同源问题，`OnShowOptionMenu` 的
+  `show-option-menu` 信号同样带 `GdkEvent*` 参数，一并补齐
+- WPE 旧分支保留 2 参签名（WPE1 2.40-2.50 契约；WPE1 2.52 起同样插入 event
+  参数，随 WPE 后端下线一并清理）
+
 ## 0.2.0-beta.1
 
 **BREAKING**: Linux 默认后端从 WPE WebKit 切换为 **WebKitGTK 4.1**（Tauri 2 同款，发行版官方包 `libwebkit2gtk-4.1-dev` 可直接安装，无需自编译）。

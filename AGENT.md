@@ -2,6 +2,53 @@
 
 > 本文件由维护 agent 写入，供下次接手时快速恢复上下文。
 
+## 2026-08-31 交付：修复 webview 右键 segfault（WebKitGTK 4.1 信号签名漂移）
+
+### 根因（gdb 实证 + 上游源码核实）
+
+右键即 SIGSEGV。gdb 断点链证明：`OnContextMenu` 的 `user_data` 不是 `InAppWebView*`，
+而是 `WebKitHitTestResult*`（`g_type_name` 鉴定）。原因：**WebKitGTK 4.1 的
+`context-menu` 信号自 2.40 起在 `context_menu` 与 `hit_test_result` 之间插入了
+`GdkEvent*` 参数**（GIR/上游 WebKitWebViewGtk3.cpp 均核实），旧 4 参 C 回调按位
+取参时 `hit_test_result` 落进 `user_data` 槽 → `self` 指向 HitTestResult 的内存
+（GObject 头，refcount=2，与内存 dump 吻合）→ 读 `self->settings_`/unref
+`self->pending_context_menu_`（垃圾指针）即崩。
+
+版本矩阵（已核实）：
+
+- webkit2gtk-4.1（2.40 首发 → 2.52+）：`context-menu` 与 `show-option-menu` 全版本
+  带 `GdkEvent*`（4.1 系内稳定）
+- WPE1/WPE2 2.40：旧 2 参签名；WPE1 2.52（main）：也加了 event（恒 NULL）
+- `web-process-terminated` 的 reason 参数 2.40 起就有，非漂移，代码签名正确
+
+### 修复（`flutter_inappwebview_linux/linux/in_app_webview/{in_app_webview.h,in_app_webview.cc}`）
+
+1. `OnContextMenu`：`HAVE_WEBKIT_GTK` 分支改为 5 参
+   `(web_view, context_menu, GdkEvent*, hit_test_result, user_data)`，event 显式
+   `(void)`；WPE 分支保留旧 4 参（随 WPE 后端下线一并清理，头文件有注释）
+2. `OnShowOptionMenu`：同源问题（`show-option-menu` 也带 `GdkEvent*`），
+   GTK 分支同样补参——修复前点 `<select>` 下拉必崩，同类问题一次修完
+
+### 验证（本机 X11，webkit2gtk-4.1 2.52.3）
+
+- 修复前：`xdotool click 3` 100% 复现 SIGSEGV（栈顶
+  `g_type_check_instance_is_fundamentally_a` ← `g_object_unref` ← OnContextMenu:4848）
+- 修复后 `flutter build linux --debug` 通过；右键菜单正常弹出
+  （Back/Forward/Stop/Reload/Inspect Element，disabled 项正确置灰）
+- 连续两次右键（原 4848 unref 崩溃路径）零 SIGSEGV；点击 Reload 菜单项执行成功
+  （Events 面板出现重载后事件），进程存活
+- 复现脚本要点：`xdotool search --name "^flutter_inappwebview_example$"` 取真实
+  窗口（勿用 class 名匹配，会命中 10x10 辅助窗口），webview 区域在窗口相对
+  (400,300)
+
+### 遗留事项
+
+- [ ] WPE 模式若需支持 WPE1 2.52+：`OnContextMenu`/`OnShowOptionMenu` 需同样补
+      `GdkEvent*`（恒 NULL）。当前 WPE 路径计划下个 minor 移除，未处理
+- [ ] 其余已连接信号（load-changed/decide-policy/show-option-menu 等）已逐一对过
+      2.52 GIR，签名均正确；后续若 WebKit 再加参数，可参照本次 GIR 对比法排查
+- 此前遗留事项（IME 验证/性能 benchmark/InAppBrowser 运行时验证等）不变，见下文
+
 ## 2026-08-31 交付：Linux 后端迁移 WPE → WebKitGTK 4.1
 
 ### 需求背景

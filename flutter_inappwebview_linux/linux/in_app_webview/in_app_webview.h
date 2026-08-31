@@ -812,8 +812,20 @@ class InAppWebView {
   static gboolean OnAuthenticate(WebKitWebView* web_view, WebKitAuthenticationRequest* request,
                                  gpointer user_data);
 
+  // WebKitGTK 4.1（2.40 起）的 context-menu 信号在 context_menu 与
+  // hit_test_result 之间插入了 GdkEvent* 参数（GDK_TYPE_EVENT |
+  // G_SIGNAL_TYPE_STATIC_SCOPE）。若按旧 4 参签名接信号，emit 时会把
+  // hit_test_result 传进 user_data 槽，导致 self 悬空、右键即 segfault。
+  // WPE（WebKitWebView 2 参 API，2.40-2.50）保持旧签名；WPE1 2.52 起同样
+  // 插入 event 参数（恒为 NULL），该分支随 WPE 后端下线一并清理。
+#ifdef HAVE_WEBKIT_GTK
+  static gboolean OnContextMenu(WebKitWebView* web_view, WebKitContextMenu* context_menu,
+                                GdkEvent* event, WebKitHitTestResult* hit_test_result,
+                                gpointer user_data);
+#else
   static gboolean OnContextMenu(WebKitWebView* web_view, WebKitContextMenu* context_menu,
                                 WebKitHitTestResult* hit_test_result, gpointer user_data);
+#endif
 
   static void OnContextMenuDismissed(WebKitWebView* web_view, gpointer user_data);
 
@@ -830,8 +842,17 @@ class InAppWebView {
   static gboolean OnRunFileChooser(WebKitWebView* web_view, WebKitFileChooserRequest* request,
                                    gpointer user_data);
 
+  // 同 context-menu：GTK 4.1 的 show-option-menu 信号为
+  // (menu, GdkEvent*, rectangle)，旧 4 参签名会把 rectangle 静态指针读进
+  // user_data 槽，<select> 下拉弹出即 segfault。
+#ifdef HAVE_WEBKIT_GTK
+  static gboolean OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu,
+                                   GdkEvent* event, WebKitRectangle* rectangle,
+                                   gpointer user_data);
+#else
   static gboolean OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu,
                                    WebKitRectangle* rectangle, gpointer user_data);
+#endif
 
   // === Download Signals ===
   static void OnDownloadStarted(WebKitNetworkSession* network_session, WebKitDownload* download,

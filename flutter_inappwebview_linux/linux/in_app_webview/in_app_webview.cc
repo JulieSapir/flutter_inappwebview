@@ -4833,8 +4833,16 @@ gboolean InAppWebView::OnAuthenticate(WebKitWebView* web_view, WebKitAuthenticat
 // NOTE: WPE WebKit renders offscreen without a GDK window.
 // We use the Flutter window's GDK window to display the native GTK context menu.
 
+// 签名对齐 WebKitGTK 4.1 的 context-menu 信号（含 GdkEvent*，见头文件注释）。
+#ifdef HAVE_WEBKIT_GTK
+gboolean InAppWebView::OnContextMenu(WebKitWebView* web_view, WebKitContextMenu* context_menu,
+                                     GdkEvent* event, WebKitHitTestResult* hit_test_result,
+                                     gpointer user_data) {
+  (void)event;
+#else
 gboolean InAppWebView::OnContextMenu(WebKitWebView* web_view, WebKitContextMenu* context_menu,
                                      WebKitHitTestResult* hit_test_result, gpointer user_data) {
+#endif
   auto* self = static_cast<InAppWebView*>(user_data);
 
   // Disable context menu if setting is enabled
@@ -7124,8 +7132,16 @@ gboolean InAppWebView::OnRunFileChooser(WebKitWebView* web_view, WebKitFileChoos
 
 // === Option Menu (HTML <select>) Handler ===
 
+// 签名对齐 WebKitGTK 4.1 的 show-option-menu 信号（含 GdkEvent*，见头文件注释）。
+#ifdef HAVE_WEBKIT_GTK
+gboolean InAppWebView::OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu,
+                                        GdkEvent* event, WebKitRectangle* rectangle,
+                                        gpointer user_data) {
+  (void)event;
+#else
 gboolean InAppWebView::OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu,
                                         WebKitRectangle* rectangle, gpointer user_data) {
+#endif
   auto* self = static_cast<InAppWebView*>(user_data);
 
   // Hide any existing option menu first
