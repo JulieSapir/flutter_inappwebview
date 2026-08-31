@@ -66,8 +66,8 @@ struct DamageSource {
   uint32_t last_w = 0, last_h = 0;         // 最后一条 damage 事件的 drawable 几何
   int32_t bbox_min_x = 0, bbox_min_y = 0;  // 本批 damage 区域包围盒（未累计时 max<min）
   int32_t bbox_max_x = -1, bbox_max_y = -1;
-  // (drawable w, h, 本批包围盒是否覆盖全 drawable)
-  std::function<void(uint32_t, uint32_t, bool)> on_damage;  // 主线程回调（已聚合）
+  // (drawable w, h, 本批 bbox) —— bbox 供守门逻辑跨批累计并集
+  std::function<void(uint32_t, uint32_t, bool, int32_t, int32_t, int32_t, int32_t)> on_damage;
 };
 
 gboolean DamageSourcePrepare(GSource* source, gint* timeout) {
@@ -113,10 +113,11 @@ gboolean DamageSourceDispatch(GSource* source, GSourceFunc, gpointer) {
   if (got_damage && s->on_damage) {
     const bool covers_full = (s->bbox_max_x - s->bbox_min_x) >= int32_t(s->last_w) &&
                              (s->bbox_max_y - s->bbox_min_y) >= int32_t(s->last_h);
+    s->on_damage(s->last_w, s->last_h, covers_full, s->bbox_min_x, s->bbox_min_y, s->bbox_max_x,
+                 s->bbox_max_y);
     // 复位包围盒，供下一批累计
     s->bbox_max_x = -1;
     s->bbox_max_y = -1;
-    s->on_damage(s->last_w, s->last_h, covers_full);
   }
   return G_SOURCE_CONTINUE;
 }
@@ -150,14 +151,19 @@ struct WebKitGpuCapture::Impl {
   std::vector<Pixmap> free_queue;  // 待主线程 XFreePixmap 的别名
 
   std::function<void()> on_frame_available;
-  int64_t last_present_us = 0;             // present 节流（上限 ~125Hz）
-  int64_t fps_window_start_us = 0;         // fps 打点窗口起点（0=未开始）
-  uint32_t fps_frames = 0;                 // 窗口内 present 次数
-  bool awaiting_full_repaint = false;      // resize 后等待 WebKit 全幅重绘
-  uint32_t await_w = 0, await_h = 0;       // 等待中的目标几何
-  int64_t await_start_us = 0;              // 几何变化时刻（超时兜底）
-  int import_failures = 0;                 // 连续导入失败计数（用于一次性响亮日志）
-  EGLDisplay engine_dpy = EGL_NO_DISPLAY;  // 首次导入时缓存的引擎显示句柄
+  int64_t last_present_us = 0;                         // present 节流（上限 ~125Hz）
+  int64_t fps_window_start_us = 0;                     // fps 打点窗口起点（0=未开始）
+  uint32_t fps_frames = 0;                             // 窗口内 present 次数
+  bool awaiting_full_repaint = false;                  // resize/首帧后等待 WebKit 全幅重绘
+  uint32_t await_w = 0, await_h = 0;                   // 等待中的目标几何
+  int64_t await_start_us = 0;                          // 几何变化时刻（超时兜底）
+  int32_t await_bbox_min_x = 0, await_bbox_min_y = 0;  // 等待期累计 damage 并集（未累计时 max<min）
+  int32_t await_bbox_max_x = -1, await_bbox_max_y = -1;
+  uint32_t old_content_w = 0, old_content_h = 0;  // 等待期 backing 中已填充有效内容的矩形
+                                                  // （XCopyArea 自旧帧的左上重叠区，非垃圾）
+  GC copy_gc = 0;                                 // XCopyArea 复用 GC（Start 创建，Stop 释放）
+  int import_failures = 0;                        // 连续导入失败计数（用于一次性响亮日志）
+  EGLDisplay engine_dpy = EGL_NO_DISPLAY;         // 首次导入时缓存的引擎显示句柄
 
   void DisposeDisplay() {
     if (dpy != nullptr) {
@@ -245,6 +251,7 @@ bool WebKitGpuCapture::Start(GtkWidget* webview_widget) {
     return false;
   }
   impl_->webview_xwin = gdk_x11_window_get_xid(gwk);
+  impl_->copy_gc = XCreateGC(impl_->dpy, impl_->webview_xwin, 0, nullptr);
 
   int ev_base = 0, err_base = 0;
   if (!XDamageQueryExtension(impl_->dpy, &ev_base, &err_base)) {
@@ -294,8 +301,9 @@ void WebKitGpuCapture::SetOnFrameAvailable(std::function<void()> callback) {
   }
   auto* ds = reinterpret_cast<DamageSource*>(impl_->source);
   if (ds != nullptr) {
-    ds->on_damage = [this](uint32_t w, uint32_t h, bool covers_full) {
-      PresentOnce(w, h, covers_full);
+    ds->on_damage = [this](uint32_t w, uint32_t h, bool covers_full, int32_t min_x, int32_t min_y,
+                           int32_t max_x, int32_t max_y) {
+      PresentOnce(w, h, covers_full, min_x, min_y, max_x, max_y);
     };
   }
   impl_->on_frame_available = std::move(callback);
@@ -316,6 +324,10 @@ void WebKitGpuCapture::Stop() {
   }
   {
     ScopedXErrors guard(impl_->dpy);
+    if (impl_->copy_gc != 0) {
+      XFreeGC(impl_->dpy, impl_->copy_gc);
+      impl_->copy_gc = 0;
+    }
     if (impl_->damage != 0) {
       XDamageDestroy(impl_->dpy, impl_->damage);
       impl_->damage = 0;
@@ -348,7 +360,9 @@ void WebKitGpuCapture::Stop() {
   debugLog("WebKitGpuCapture: stopped");
 }
 
-void WebKitGpuCapture::PresentOnce(uint32_t ev_w, uint32_t ev_h, bool ev_covers_full) {
+void WebKitGpuCapture::PresentOnce(uint32_t ev_w, uint32_t ev_h, bool ev_covers_full,
+                                   int32_t ev_min_x, int32_t ev_min_y, int32_t ev_max_x,
+                                   int32_t ev_max_y) {
   if (impl_ == nullptr || !active_ || !impl_->on_frame_available) {
     return;
   }
@@ -401,30 +415,163 @@ void WebKitGpuCapture::PresentOnce(uint32_t ev_w, uint32_t ev_h, bool ev_covers_
       return;
     }
   }
-  // resize 脏帧守门：几何与上次 present 不同 = backing 刚被服务端重分配，
-  // 此时帧的内容只有旧尺寸区域有效，其余是未初始化显存（实测拖拽中出现
-  // 脏块）。跳过几何变化后的首个 damage（服务端 resize 自带的全幅 damage），
-  // 等 WebKit 对新尺寸的重绘（包围盒覆盖全 drawable）再恢复 present；等待
-  // 期间引擎沿用旧帧（轻微拉伸，远好于脏块）。几何再变（拖拽连续步进）则
-  // 刷新目标继续等。250ms 兜底：部分重绘场景不至永久卡旧帧。
+  // resize/首帧脏帧守门：几何与上次 present 不同 = backing 刚被服务端重分配，
+  // 未重绘区域是未初始化显存，直接 present 即脏帧（初次载入/拖拽实测）。
+  //
+  // 等待策略（RCA：拖拽冻结 + 初次载入脏帧，三次迭代）：
+  //  1. 首帧（无任何已交付帧）：只能等 WebKit 重绘完成——跨批累计 damage
+  //     并集覆盖全 drawable 才放行（渐进分块渲染凑不齐单批全幅），不设超时
+  //     兜底（黑屏优于显存噪声）。
+  //  2. resize 过渡（有旧帧）：旧帧内容 + 边缘色填充把新 backing 填满后
+  //     立即放行（零等待，每步出帧）；WebKit 全幅重绘随后到达，作为稳态帧
+  //     覆盖。等待/超时仅剩拷贝失败的回退路径。
   // 注意：等待期间 pending 仍为旧值，后续事件依旧满足「几何≠pending」，
-  // 必须用 await_w/h 判定是否已在等同一目标尺寸，否则全幅重绘帧永远进不了
-  // 放行分支（实测死锁：首帧永无落地，no frame yet 刷屏）。
+  // 必须用 await_w/h 判定是否已在等同一目标尺寸，否则重绘帧永远进不了
+  // 放行分支（实测死锁）。等待中丢弃的 px 别名必须释放（实测泄漏点）。
   const bool resized_since_present = (impl_->pending_w != w || impl_->pending_h != h);
   const bool awaiting_this_size =
       impl_->awaiting_full_repaint && impl_->await_w == w && impl_->await_h == h;
+  bool present_now;
   if (resized_since_present && !awaiting_this_size) {
+    // 新 backing 世代：重置累计
     impl_->awaiting_full_repaint = true;
     impl_->await_w = w;
     impl_->await_h = h;
     impl_->await_start_us = now;
-    return;
-  }
-  if (impl_->awaiting_full_repaint) {
-    if (!ev_covers_full && now - impl_->await_start_us < 250000) {
-      return;  // 未见全幅重绘且未超时，继续等
+    impl_->await_bbox_min_x = 0;
+    impl_->await_bbox_min_y = 0;
+    impl_->await_bbox_max_x = -1;
+    impl_->await_bbox_max_y = -1;
+    impl_->old_content_w = 0;
+    impl_->old_content_h = 0;
+    // 拷贝源：引擎正在展示的 bound 优先，pending 兜底（锁内快照，锁外 X 调用）
+    Pixmap src = 0;
+    uint32_t sw = 0, sh = 0;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      if (impl_->bound_pixmap != 0) {
+        src = impl_->bound_pixmap;
+        sw = impl_->bound_w;
+        sh = impl_->bound_h;
+      } else if (impl_->pending_pixmap != 0) {
+        src = impl_->pending_pixmap;
+        sw = impl_->pending_w;
+        sh = impl_->pending_h;
+      }
     }
+    if (src == 0) {
+      // 首帧（无任何已交付帧，无可拷贝的旧内容）：只能等 WebKit 重绘完成
+      // ——跨批累计 damage 并集覆盖全 drawable 才放行，不设超时（黑屏优于
+      // 显存噪声）。WebKit 布局完成后首绘必然铺满 drawable，正常 0.1~0.7s。
+      debugLog("WebKitGpuCapture: await full repaint " + std::to_string(w) + "x" +
+               std::to_string(h) + " (first frame, no old content)");
+      XFreePixmap(impl_->dpy, px);  // 等待期间不需要该别名（修复泄漏）
+      return;
+    }
+    // resize 过渡：旧帧内容填充新 backing，消除「等整幅重绘」的拖拽冻结
+    // （实测 20 步拖拽 1.2s 零帧交付——WebKit 全幅重绘 ~60-100ms 赶不上
+    // 65ms 步进，在途重绘 damage 被下一步重置吞掉）。两步填充后 backing
+    // 全域有效，本帧立即放行；WebKit 全幅重绘随后到达，作为稳态帧覆盖：
+    //  1. XCopyArea：左上重叠区填旧帧内容（缩小方向即全域）
+    //  2. XFillRectangle：增量区（右条+下条）用旧帧右下角像素色填充
+    //     （自适应深/浅色页面；取色失败回退白色）
+    const uint32_t cw = std::min(sw, w);
+    const uint32_t ch = std::min(sh, h);
+    unsigned long fill_pixel = 0xFFFFFFFF;
+    bool fill_ok = false;
+    {
+      ScopedXErrors guard(impl_->dpy);
+      if (impl_->copy_gc == 0) {
+        impl_->copy_gc = XCreateGC(impl_->dpy, px, 0, nullptr);
+      }
+      XCopyArea(impl_->dpy, src, px, impl_->copy_gc, 0, 0, cw, ch, 0, 0);
+      if (guard.count() == 0) {
+        impl_->old_content_w = cw;
+        impl_->old_content_h = ch;
+        if (w > cw || h > ch) {
+          // 取旧帧右下角单像素作为增量区填充色（深/浅色页面自适应）
+          XImage* img = XGetImage(impl_->dpy, src, static_cast<int>(sw) - 1,
+                                  static_cast<int>(sh) - 1, 1, 1, AllPlanes, ZPixmap);
+          if (img != nullptr) {
+            fill_pixel = XGetPixel(img, 0, 0);
+            XDestroyImage(img);
+          }
+          XSetForeground(impl_->dpy, impl_->copy_gc, fill_pixel);
+          if (w > cw) {
+            XFillRectangle(impl_->dpy, px, impl_->copy_gc, static_cast<int>(cw), 0, w - cw, h);
+          }
+          if (h > ch) {
+            XFillRectangle(impl_->dpy, px, impl_->copy_gc, 0, static_cast<int>(ch), cw, h - ch);
+          }
+        }
+        fill_ok = guard.count() == 0;
+      }
+    }
+    if (fill_ok) {
+      // backing 全域有效（旧内容 + 填充边），立即放行，不等重绘
+      impl_->awaiting_full_repaint = false;
+      present_now = true;
+    } else {
+      // 拷贝/填充失败（X 错误）：backing 有垃圾，退回等待重绘（250ms 兜底）
+      debugLog("WebKitGpuCapture: resize fill failed, fallback to await repaint");
+      XFreePixmap(impl_->dpy, px);
+      return;
+    }
+  } else if (impl_->awaiting_full_repaint) {
+    // 首帧等待中（正常 resize 不再进入此状态，仅首帧与填充失败回退）：
+    // 跨批累计本批 damage 区域
+    if (ev_max_x >= ev_min_x && ev_max_y >= ev_min_y) {
+      if (impl_->await_bbox_max_x < impl_->await_bbox_min_x) {  // 第一批
+        impl_->await_bbox_min_x = ev_min_x;
+        impl_->await_bbox_min_y = ev_min_y;
+      } else {
+        impl_->await_bbox_min_x = std::min(impl_->await_bbox_min_x, ev_min_x);
+        impl_->await_bbox_min_y = std::min(impl_->await_bbox_min_y, ev_min_y);
+      }
+      impl_->await_bbox_max_x = std::max(impl_->await_bbox_max_x, ev_max_x);
+      impl_->await_bbox_max_y = std::max(impl_->await_bbox_max_y, ev_max_y);
+    }
+    // 有效区域 = 拷贝的旧内容矩形 ∪ WebKit damage 并集，覆盖全 drawable 即重绘完成。
+    // （联合包围盒阶梯近似：拷贝矩形自 (0,0) 起，增量 damage 补右上/右下，
+    // 中间漏画的罕见场景由 250ms 兜底收敛）
+    const bool bbox_valid = impl_->await_bbox_max_x >= impl_->await_bbox_min_x;
+    const int32_t eff_max_x = std::max<int32_t>(bbox_valid ? impl_->await_bbox_max_x : 0,
+                                                static_cast<int32_t>(impl_->old_content_w));
+    const int32_t eff_max_y = std::max<int32_t>(bbox_valid ? impl_->await_bbox_max_y : 0,
+                                                static_cast<int32_t>(impl_->old_content_h));
+    const bool effective_covers_full = eff_max_x >= int32_t(w) && eff_max_y >= int32_t(h);
+    // 超时兜底分级：
+    //  - 尚无任何帧交付（首帧，无拷贝源）：不设超时——宁可纹理未交付（黑屏
+    //    观感），不可放行未初始化 backing。WebKit 布局完成后首绘必然铺满
+    //    drawable（单批或渐进并集），正常 0.1~0.7s 内放行。
+    //  - 已有旧帧（resize 过渡）：250ms——兜底放行的帧此时也已无垃圾
+    //    （拷贝旧内容 + 部分新内容），只防 WebProcess 卡死类极端场景。
+    const bool have_old_frame = impl_->pending_w != 0;
+    if (!ev_covers_full && !effective_covers_full) {
+      if (!have_old_frame) {
+        XFreePixmap(impl_->dpy, px);
+        return;  // 首帧：必须等到 WebKit 重绘完成
+      }
+      if (now - impl_->await_start_us < 250000) {
+        XFreePixmap(impl_->dpy, px);
+        return;  // resize 过渡：兜底未到，继续等
+      }
+    }
+    const bool timed_out = !ev_covers_full && !effective_covers_full;
     impl_->awaiting_full_repaint = false;
+    debugLog(std::string("WebKitGpuCapture: release frame ") +
+             (timed_out ? "TIMEOUT" : "repaint-complete") + " after " +
+             std::to_string((now - impl_->await_start_us) / 1000) +
+             "ms (batch_full=" + (ev_covers_full ? "1" : "0") +
+             " effective_full=" + (effective_covers_full ? "1" : "0") +
+             " old_content=" + std::to_string(impl_->old_content_w) + "x" +
+             std::to_string(impl_->old_content_h) + ")");
+    present_now = true;
+  } else {
+    present_now = true;  // 稳态（几何未变且非等待）
+  }
+  if (!present_now) {
+    return;
   }
   // fps 打点（debug）：每 5s 汇报实际出帧速率（过守门后的真实交付帧）
   impl_->fps_frames++;

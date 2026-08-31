@@ -1,5 +1,43 @@
+## 0.2.0-beta.3
+
+- 修复初次载入时 webview 显示未初始化显存噪声（脏帧）：
+  - 守门「重绘完成」判定从「单批 damage 包围盒覆盖全 drawable」扩展为
+    **跨批累计 damage 并集覆盖**——WebKit 初次载入是渐进分块渲染，单批
+    判定永远凑不齐，此前只能等 250ms 超时放行部分内容帧（脏）
+  - **首帧零超时兜底**：从未向引擎交付过帧时（初次载入），必须等到
+    WebKit 重绘完成才放行。RCA：构造初始尺寸阶段（如 800x600）几何正确
+    但 WebKit 尚未绘制，backing 全是未初始化显存，任何超时放行都是脏帧；
+    极端场景（WebProcess 永不绘制）黑屏本身即真实状态。实测首帧在
+    65~700ms 内以 `repaint-complete` 干净交付，稳定复现 3 轮 +
+    resize 重建实例场景从 5s 超时脏帧变为 ~390ms 干净交付
+  - resize 过渡期（已有旧帧）250ms 兜底保留不变
+- GPU 直通模式下 popup 宿主 map 后立即用 `gdk_window_move_resize` 钉位
+  目标几何（InitGtkHost），加快构造尺寸到目标尺寸的收敛
+
 ## 0.2.0-beta.2
 
+- 修复调整窗口宽高时渲染冻结（拖拽卡顿）：GPU 直通守门对每次几何变化
+  都重置等待状态，WebKit 全幅重绘（~60-100ms）赶不上连续步进（~65ms），
+  在途重绘 damage 被下一步重置吞掉，实测 20 步拖拽 1.2s 零帧交付（画面
+  完全静止）。改为 resize 过渡时用旧帧内容 + 边缘像素色填充新 backing
+  （`XCopyArea` 重叠区 + `XFillRectangle` 增量区，深/浅色页面自适应）后
+  **立即放行**：backing 全域有效（无未初始化显存），每步即时出帧，
+  WebKit 全幅重绘随后作为稳态帧覆盖。实测 20 步拖拽每步出帧、无 X 错误
+- 修复 GPU 直通守门丢弃的 `NameWindowPixmap` 别名泄漏（等待路径每步泄漏
+  一个 pixmap，拖拽场景放大显存压力）
+- 修复初次载入时 webview 显示未初始化显存噪声（脏帧）：
+  - 守门「重绘完成」判定从「单批 damage 包围盒覆盖全 drawable」扩展为
+    **跨批累计 damage 并集覆盖**——WebKit 初次载入是渐进分块渲染，单批
+    判定永远凑不齐，此前只能等 250ms 超时放行部分内容帧（脏）
+  - **首帧零超时兜底**：从未向引擎交付过帧时（初次载入），必须等到
+    WebKit 重绘完成才放行。RCA：构造初始尺寸阶段（如 800x600）几何正确
+    但 WebKit 尚未绘制，backing 全是未初始化显存，任何超时放行都是脏帧；
+    极端场景（WebProcess 永不绘制）黑屏本身即真实状态。实测首帧在
+    65~700ms 内以 `repaint-complete` 干净交付（3 轮重启稳定复现），
+    resize 重建实例场景从 5s 超时脏帧变为 ~390ms 干净交付
+  - resize 过渡期（已有旧帧）250ms 兜底保留不变
+- GPU 直通模式下 popup 宿主 map 后立即用 `gdk_window_move_resize` 钉位
+  目标几何（InitGtkHost），加快构造尺寸到目标尺寸的收敛
 - 新增 **GPU 直通渲染管线**（默认，能力探测自动启用）：XComposite redirect +
   Damage 驱动 + `XCompositeNameWindowPixmap` 别名 + `EGL_KHR_image_pixmap`
   零拷贝导入引擎纹理（`webkit_gpu_capture.cc`）。实测（i915 / 60Hz /

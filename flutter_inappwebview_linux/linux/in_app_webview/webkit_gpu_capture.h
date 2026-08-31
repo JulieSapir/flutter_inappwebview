@@ -66,7 +66,11 @@ class WebKitGpuCapture {
   // 内容严格同源）；传 0 时退化为一次 XGetGeometry 取当前真值。
   // ev_covers_full：本批 damage 区域包围盒是否覆盖整个 drawable（WebKit 对
   // 新尺寸的全幅重绘标志）。
-  void PresentOnce(uint32_t ev_w = 0, uint32_t ev_h = 0, bool ev_covers_full = false);
+  // ev_min/max：本批 damage 包围盒（max<min 表示无 bbox 信息），供守门逻辑
+  // 跨批累计并集判定「多批渐进重绘合起来铺满 drawable」。
+  void PresentOnce(uint32_t ev_w = 0, uint32_t ev_h = 0, bool ev_covers_full = false,
+                   int32_t ev_min_x = 0, int32_t ev_min_y = 0, int32_t ev_max_x = -1,
+                   int32_t ev_max_y = -1);
 
   // === 引擎 raster 线程（FlTextureGL::populate）===
 

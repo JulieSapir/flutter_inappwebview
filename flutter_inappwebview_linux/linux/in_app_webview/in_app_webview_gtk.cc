@@ -32,6 +32,7 @@
 #ifdef HAVE_WEBKIT_GTK
 
 #include <gdk/gdk.h>
+#include <gdk/gdkx.h>  // GDK_IS_X11_WINDOW（GPU 直通宿主 X 窗口钉位）
 
 #include <algorithm>
 #include <cstring>
@@ -138,6 +139,19 @@ void InAppWebView::InitGtkHost() {
 
   gtk_widget_show(GTK_WIDGET(webview_));
   gtk_widget_show(GTK_WIDGET(gtk_host_window_));
+
+  // GPU 直通：map 后立即用 gdk 路径把宿主 X 窗口钉到位。RCA（初次载入脏）：
+  // gtk_window_resize 的请求要等 GTK 主循环布局轮才落到 X 服务端（实测 ~1.2s），
+  // 期间 X 窗口停在 GTK 默认 800x600——Start 捕获的几何错误，且该阶段 WebKit
+  // 未绘制，backing 全是未初始化显存。popup 宿主完全走 gdk 路径（同 setSize
+  // 的单写入者原则）：gdk_window_move_resize 直接发 XConfigureWindow，服务端
+  // 立即生效，顺带重钉屏外定位。GtkOffscreenWindow 无 X 窗口，跳过。
+  if (gpu_capable) {
+    GdkWindow* host_gdk = gtk_widget_get_window(GTK_WIDGET(gtk_host_window_));
+    if (host_gdk != nullptr && GDK_IS_X11_WINDOW(host_gdk)) {
+      gdk_window_move_resize(host_gdk, -(2 * width_ + 256), -(2 * height_ + 256), width_, height_);
+    }
+  }
 
   // GPU 直通：宿主就绪后启动捕获（redirect + damage 源 + 首帧别名）。
   // 帧输出回调在纹理注册后由 AttachGpuCaptureOutput 接线；此前 damage 只计数。

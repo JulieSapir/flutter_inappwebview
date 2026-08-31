@@ -2,6 +2,109 @@
 
 > 本文件由维护 agent 写入，供下次接手时快速恢复上下文。
 
+## 2026-08-31 修复：拖拽 resize 冻结（每步几何变化重置等待 → 20 步拖拽 1.2s 零帧）
+
+### RCA（present size 时间线实证）
+
+- 症状：调整窗口宽高时画面卡顿/冻结，拖拽停止后才恢复
+- 日志铁证（修复前）：20 步连续 resize（65ms 间隔）期间**零帧交付**，
+  只有拖拽停止后尾部 1 帧（`repaint-complete after 387ms`）。机制：
+  每步几何变化都进入 await 等待并重置 damage 并集累计 + 250ms 兜底计时，
+  WebKit 全幅重绘（~60-100ms）赶不上下一步（65ms），在途重绘 damage 到达时
+  几何已再变（新世代）→ 被重置吞掉 → 步进期间永远凑不满 → 全程冻结
+- 判据演进（中间方案被实测否决一次）：先做「XCopyArea 旧帧重叠区 +
+  effective 并集判定」——缩小方向立即放行 ✓，但放大方向仍要等 WebKit 补画
+  增量区，重绘赶不上步进时依旧零帧（日志复现）。最终改为「填充后立即放行」
+- 顺手修复：守门等待路径丢弃的 `NameWindowPixmap` 别名未释放（每次泄漏一个
+  pixmap，拖拽场景放大显存压力）
+
+### 最终方案（`webkit_gpu_capture.cc` 守门重构）
+
+resize 过渡（有旧帧）时把新 backing **填满后立即放行，零等待**：
+
+1. `XCopyArea`：旧帧（bound 优先，pending 兜底，锁内快照锁外调用）左上
+   重叠区 → 新 backing（缩小方向即全域覆盖）
+2. `XFillRectangle`：增量区（右条 + 下条 L 形）用旧帧右下角单像素色填充
+   （`XGetImage` 1x1 取色，深/浅色页面自适应，失败回退白色）
+3. backing 全域有效（无未初始化显存）→ 立即 present；WebKit 全幅重绘
+   ~60-100ms 后到达，作为稳态帧覆盖（present 后 awaiting=false 直通道）
+
+首帧场景（无任何已交付帧）逻辑不变：跨批 damage 并集凑满才放行、零超时
+兜底（黑屏优于噪声）。拷贝/填充 X 错误时回退等待 + 250ms 兜底。
+
+### 验证（:0，GPU 直通，重建后二进制）
+
+- 20 步拖拽（65ms 间隔，900↔1530 往返）：**每步即时出帧**（present size
+  全程跟踪 990→1170→1350→…→1260，20/20），无 await 阻塞、无 fill failed、
+  零 X 错误；修复前同场景 1.2s 零帧
+- 视觉：窗口 activate 后 1550x720 截图——webview 全宽渲染 flutter.dev
+  完整内容，无噪声/脏块/花屏
+- 回归：初次载入首帧仍 `repaint-complete` 干净帧（117ms，800x600 阶段零
+  放行）；稳态 fps=19 与基线一致
+
+### 教训
+
+- **「等待重绘完成」类守门必须回答「步进中怎么办」**：任何以「完整性」为
+  放行条件的机制，在连续变化场景下都会被下一步重置清零——要么填满内容
+  立即放行（本次方案），要么接受冻结。中间态（等增量重绘）两头不讨好
+- X11 backing 无「已绘制」元数据，但可以**自己制造有效性**：拷贝旧内容 +
+  纯色填充增量区，把「等待 WebKit」转化为「已知有效内容立即交付」
+
+## 2026-08-31 修复：初次载入脏帧（渐进渲染凑不齐单批全幅 + 构造尺寸阶段 backing 未初始化）
+
+### RCA（日志诊断打点实证，三轮判据修正）
+
+- 症状：webview 初次载入时画面是脏的（未初始化显存噪声），加载完成后自愈
+- 诊断手段：PresentOnce 守门逻辑加 debug 打点（`await full repaint WxH` /
+  `release frame TIMEOUT|repaint-complete ... (batch_full= union_full= old_frame=)`），
+  日志取证不依赖窗口截图（:0 桌面被 Minecraft 占用时截图法不可行）
+- 日志铁证（修复前）：初次载入两次放行都是 `TIMEOUT + covers_full=0`——
+  ① 800x600 阶段（构造初始尺寸，GTK 布局轮 0.2~1.2s 后才把 X 窗口调到目标
+  1280x204）：WebKit 尚未绘制，backing 全是未初始化显存，超时放行=脏帧
+  ② 1280x204 阶段：WebKit 渐进分块渲染，每批 damage 只覆盖一部分，
+  「单批包围盒覆盖全 drawable」永远凑不齐 → 250ms 超时放行部分内容帧（脏）
+- 判据修正过程（两个中间方案被实测否决）：
+  - 方案 A「并集覆盖 + 首帧 5s 兜底」：resize 步进中创建的实例（example 重建
+    widget）页面已稳定、后续只有局部动画 damage，并集永凑不满 → 5s 黑屏
+  - 方案 B「首帧 1s 兜底 + expected 几何校验」：几何收敛时机运行间波动
+    （164ms~1.2s），慢收敛时 1s 兜底先触发，800x600 脏帧复现；且 800x600 是
+    「当时的正确几何」（Dart 稍后才 setSize），expected 校验方向本身就错
+  - 最终方案（生效）：**首帧零超时兜底**——从未向引擎交付过帧时必须等到
+    重绘完成（单批或渐进并集覆盖）才放行；resize 过渡（已有旧帧）保留 250ms
+    兜底。极端场景（WebProcess 永不绘制）黑屏即真实状态，优于显存噪声
+- 附带发现：example 主窗口 resize 会销毁重建 webview widget（应用行为），
+  新实例以构造尺寸 800x600 创建后立即经历连续 resize 步进——该场景旧逻辑
+  5s 超时脏帧、新逻辑 387ms `repaint-complete` 干净交付
+
+### 修复内容（`webkit_gpu_capture.{h,cc}`、`in_app_webview_gtk.cc`）
+
+1. 守门「重绘完成」判定：DamageSource 回调传出本批 damage bbox
+   （`on_damage(w,h,covers_full,min_x,min_y,max_x,max_y)`），PresentOnce 在
+   await 期间跨批累计并集（`await_bbox_*`，进入等待/几何变化时重置），
+   并集覆盖全 drawable 即放行；250ms 兜底仅对「已有旧帧」的 resize 过渡生效
+2. InitGtkHost：popup 宿主 map 后立即 `gdk_window_move_resize` 钉位目标几何
+   （同 setSize 的单写入者原则），加快构造尺寸→目标尺寸收敛（include 补
+   `gdk/gdkx.h`，`GDK_IS_X11_WINDOW`）
+3. 打点保留：`release frame` 日志含 batch_full/union_full/old_frame 三元组，
+   供下次渲染问题排查对照
+
+### 验证（:0，GPU 直通，重建后二进制）
+
+- 3 轮重启复验：首个交付帧均为 `repaint-complete` 1280x204（65/96/113ms），
+  800x600 阶段零放行，零 TIMEOUT
+- resize 步进回归（8 步连续 resize）：重建实例 387ms 干净交付；稳态 fps=19
+  （页面动画实际变化率）与修复前一致
+- 遗留：`g_object_unref` CRITICAL（secondary webview 销毁路径，存量问题）
+  本次仍出现一次，与本次改动无关
+
+### 教训
+
+- **「超时兜底放行」对首帧场景是脏帧发生器**：兜底只适用于「有旧帧可退」的
+  场景；首帧的退路（黑屏）与脏帧的取舍必须显式选择
+- **X backing 内容无「已绘制」元数据**：damage 事件的 area/geometry 无法区分
+  「WebKit 真实绘制」与「窗口配置杂项 damage」，只能靠守门策略取舍
+- 守门类日志（进入等待/放行原因）值得长期保留，是渲染时序问题的第一取证手段
+
 ## 2026-08-31 修复：resize 渲染异常（popup 宿主 X 窗口卡旧尺寸 → X11 祖先裁剪）
 
 ### 完整 RCA（两轮修复，实证闭环）
