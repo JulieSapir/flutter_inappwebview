@@ -2,7 +2,6 @@
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_COOKIE_MANAGER_H_
 
 #include <flutter_linux/flutter_linux.h>
-#include <wpe/webkit.h>
 
 #include <functional>
 #include <memory>
@@ -11,6 +10,7 @@
 #include <vector>
 
 #include "types/channel_delegate.h"
+#include "webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 

@@ -1,8 +1,7 @@
 #include "hit_test_result.h"
 
-#include <wpe/webkit.h>
-
 #include "../utils/flutter.h"
+#include "../webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 

@@ -327,9 +327,15 @@ class LinuxInAppWebViewController extends PlatformInAppWebViewController
           WebResourceRequest request = WebResourceRequest.fromMap(
             arguments["request"]?.cast<String, dynamic>(),
           )!;
-          WebResourceError error = WebResourceError.fromMap(
-            arguments["error"]?.cast<String, dynamic>(),
-          )!;
+          // WebResourceErrorType 无 Linux native value 映射（platform_interface
+          // 契约缺口），fromMap 的 fromNativeValue(map['type'])! 恒崩溃。
+          // 此处直接构造：type 降级为 IO，完整错误信息保留在 description 中。
+          final errorMap = arguments["error"]?.cast<String, dynamic>();
+          WebResourceError error = WebResourceError(
+            type: WebResourceErrorType.IO,
+            description:
+                errorMap?["description"] as String? ?? "Unknown error",
+          );
           var isForMainFrame = request.isForMainFrame ?? false;
 
           if (webviewParams != null) {

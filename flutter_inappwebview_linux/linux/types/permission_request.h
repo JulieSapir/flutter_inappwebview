@@ -2,12 +2,13 @@
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_PERMISSION_REQUEST_H_
 
 #include <flutter_linux/flutter_linux.h>
-#include <wpe/webkit.h>
 
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "../webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 

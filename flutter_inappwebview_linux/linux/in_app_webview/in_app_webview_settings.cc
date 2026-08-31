@@ -26,7 +26,8 @@ InAppWebViewSettings::InAppWebViewSettings(FlValue* map) : InAppWebViewSettings(
       get_fl_map_value(map, "useShouldOverrideUrlLoading", useShouldOverrideUrlLoading);
   useOnLoadResource = get_fl_map_value(map, "useOnLoadResource", useOnLoadResource);
   useOnDownloadStart = get_fl_map_value(map, "useOnDownloadStart", useOnDownloadStart);
-  useOnNavigationResponse = get_fl_map_value(map, "useOnNavigationResponse", useOnNavigationResponse);
+  useOnNavigationResponse =
+      get_fl_map_value(map, "useOnNavigationResponse", useOnNavigationResponse);
   useShouldInterceptRequest =
       get_fl_map_value(map, "useShouldInterceptRequest", useShouldInterceptRequest);
   useShouldInterceptAjaxRequest =
@@ -90,9 +91,9 @@ InAppWebViewSettings::InAppWebViewSettings(FlValue* map) : InAppWebViewSettings(
       get_fl_map_value(map, "enableHyperlinkAuditing", enableHyperlinkAuditing);
   enableDnsPrefetching = get_fl_map_value(map, "enableDnsPrefetching", enableDnsPrefetching);
   enableCaretBrowsing = get_fl_map_value(map, "enableCaretBrowsing", enableCaretBrowsing);
-  isElementFullscreenEnabled = get_fl_map_value(map, "isElementFullscreenEnabled", isElementFullscreenEnabled);
-  enableHtml5LocalStorage =
-      get_fl_map_value(map, "domStorageEnabled", enableHtml5LocalStorage);
+  isElementFullscreenEnabled =
+      get_fl_map_value(map, "isElementFullscreenEnabled", isElementFullscreenEnabled);
+  enableHtml5LocalStorage = get_fl_map_value(map, "domStorageEnabled", enableHtml5LocalStorage);
   enableHtml5Database = get_fl_map_value(map, "databaseEnabled", enableHtml5Database);
   enablePageCache = get_fl_map_value(map, "enablePageCache", enablePageCache);
   drawCompositingIndicators =
@@ -107,7 +108,8 @@ InAppWebViewSettings::InAppWebViewSettings(FlValue* map) : InAppWebViewSettings(
   printBackgrounds = get_fl_map_value(map, "printBackgrounds", printBackgrounds);
   enableSpatialNavigation =
       get_fl_map_value(map, "enableSpatialNavigation", enableSpatialNavigation);
-  defaultTextEncodingName = get_fl_map_value(map, "defaultTextEncodingName", defaultTextEncodingName);
+  defaultTextEncodingName =
+      get_fl_map_value(map, "defaultTextEncodingName", defaultTextEncodingName);
   standardFontFamily = get_fl_map_value(map, "standardFontFamily", standardFontFamily);
   fixedFontFamily = get_fl_map_value(map, "fixedFontFamily", fixedFontFamily);
   serifFontFamily = get_fl_map_value(map, "serifFontFamily", serifFontFamily);
@@ -123,29 +125,38 @@ InAppWebViewSettings::InAppWebViewSettings(FlValue* map) : InAppWebViewSettings(
       map, "minimumLogicalFontSize", static_cast<int64_t>(minimumLogicalFontSize)));
 
   // === Security settings ===
-  allowFileAccessFromFileURLs = get_fl_map_value(map, "allowFileAccessFromFileURLs", allowFileAccessFromFileURLs);
-  allowUniversalAccessFromFileURLs = get_fl_map_value(map, "allowUniversalAccessFromFileURLs", allowUniversalAccessFromFileURLs);
+  allowFileAccessFromFileURLs =
+      get_fl_map_value(map, "allowFileAccessFromFileURLs", allowFileAccessFromFileURLs);
+  allowUniversalAccessFromFileURLs =
+      get_fl_map_value(map, "allowUniversalAccessFromFileURLs", allowUniversalAccessFromFileURLs);
   disableWebSecurity = get_fl_map_value(map, "disableWebSecurity", disableWebSecurity);
-  allowTopNavigationToDataUrls = get_fl_map_value(map, "allowTopNavigationToDataUrls", allowTopNavigationToDataUrls);
+  allowTopNavigationToDataUrls =
+      get_fl_map_value(map, "allowTopNavigationToDataUrls", allowTopNavigationToDataUrls);
 
   // === Clipboard settings ===
-  javaScriptCanAccessClipboard = get_fl_map_value(map, "javaScriptCanAccessClipboard", javaScriptCanAccessClipboard);
+  javaScriptCanAccessClipboard =
+      get_fl_map_value(map, "javaScriptCanAccessClipboard", javaScriptCanAccessClipboard);
 
   // === WebRTC settings ===
   enableWebRTC = get_fl_map_value(map, "enableWebRTC", enableWebRTC);
   webRTCUdpPortsRange = get_fl_map_value(map, "webRTCUdpPortsRange", webRTCUdpPortsRange);
 
   // === Media settings ===
-  allowsInlineMediaPlayback = get_fl_map_value(map, "allowsInlineMediaPlayback", allowsInlineMediaPlayback);
+  allowsInlineMediaPlayback =
+      get_fl_map_value(map, "allowsInlineMediaPlayback", allowsInlineMediaPlayback);
   enableMedia = get_fl_map_value(map, "enableMedia", enableMedia);
   enableEncryptedMedia = get_fl_map_value(map, "enableEncryptedMedia", enableEncryptedMedia);
-  enableMediaCapabilities = get_fl_map_value(map, "enableMediaCapabilities", enableMediaCapabilities);
-  enableMockCaptureDevices = get_fl_map_value(map, "enableMockCaptureDevices", enableMockCaptureDevices);
-  mediaContentTypesRequiringHardwareSupport = get_fl_map_value(map, "mediaContentTypesRequiringHardwareSupport", mediaContentTypesRequiringHardwareSupport);
+  enableMediaCapabilities =
+      get_fl_map_value(map, "enableMediaCapabilities", enableMediaCapabilities);
+  enableMockCaptureDevices =
+      get_fl_map_value(map, "enableMockCaptureDevices", enableMockCaptureDevices);
+  mediaContentTypesRequiringHardwareSupport = get_fl_map_value(
+      map, "mediaContentTypesRequiringHardwareSupport", mediaContentTypesRequiringHardwareSupport);
 
   // === Other settings ===
   enableJavaScriptMarkup = get_fl_map_value(map, "enableJavaScriptMarkup", enableJavaScriptMarkup);
-  enable2DCanvasAcceleration = get_fl_map_value(map, "enable2DCanvasAcceleration", enable2DCanvasAcceleration);
+  enable2DCanvasAcceleration =
+      get_fl_map_value(map, "enable2DCanvasAcceleration", enable2DCanvasAcceleration);
   allowModalDialogs = get_fl_map_value(map, "allowModalDialogs", allowModalDialogs);
 
   // === WPE Platform settings ===
@@ -159,39 +170,32 @@ InAppWebViewSettings::InAppWebViewSettings(FlValue* map) : InAppWebViewSettings(
     fontAntialias = get_fl_map_value<bool>(map, "fontAntialias", true);
   }
   if (fl_map_contains_not_null(map, "fontHintingStyle")) {
-    fontHintingStyle = static_cast<int>(
-        get_fl_map_value<int64_t>(map, "fontHintingStyle", 0));
+    fontHintingStyle = static_cast<int>(get_fl_map_value<int64_t>(map, "fontHintingStyle", 0));
   }
   if (fl_map_contains_not_null(map, "fontSubpixelLayout")) {
-    fontSubpixelLayout = static_cast<int>(
-        get_fl_map_value<int64_t>(map, "fontSubpixelLayout", 0));
+    fontSubpixelLayout = static_cast<int>(get_fl_map_value<int64_t>(map, "fontSubpixelLayout", 0));
   }
   if (fl_map_contains_not_null(map, "fontDPI")) {
     fontDPI = get_fl_map_value<double>(map, "fontDPI", 96.0);
   }
   if (fl_map_contains_not_null(map, "cursorBlinkTime")) {
-    cursorBlinkTime = static_cast<int>(
-        get_fl_map_value<int64_t>(map, "cursorBlinkTime", 1200));
+    cursorBlinkTime = static_cast<int>(get_fl_map_value<int64_t>(map, "cursorBlinkTime", 1200));
   }
   if (fl_map_contains_not_null(map, "doubleClickDistance")) {
-    doubleClickDistance = static_cast<int>(
-        get_fl_map_value<int64_t>(map, "doubleClickDistance", 5));
+    doubleClickDistance =
+        static_cast<int>(get_fl_map_value<int64_t>(map, "doubleClickDistance", 5));
   }
   if (fl_map_contains_not_null(map, "doubleClickTime")) {
-    doubleClickTime = static_cast<int>(
-        get_fl_map_value<int64_t>(map, "doubleClickTime", 400));
+    doubleClickTime = static_cast<int>(get_fl_map_value<int64_t>(map, "doubleClickTime", 400));
   }
   if (fl_map_contains_not_null(map, "dragThreshold")) {
-    dragThreshold = static_cast<int>(
-        get_fl_map_value<int64_t>(map, "dragThreshold", 8));
+    dragThreshold = static_cast<int>(get_fl_map_value<int64_t>(map, "dragThreshold", 8));
   }
   if (fl_map_contains_not_null(map, "keyRepeatDelay")) {
-    keyRepeatDelay = static_cast<int>(
-        get_fl_map_value<int64_t>(map, "keyRepeatDelay", 400));
+    keyRepeatDelay = static_cast<int>(get_fl_map_value<int64_t>(map, "keyRepeatDelay", 400));
   }
   if (fl_map_contains_not_null(map, "keyRepeatInterval")) {
-    keyRepeatInterval = static_cast<int>(
-        get_fl_map_value<int64_t>(map, "keyRepeatInterval", 80));
+    keyRepeatInterval = static_cast<int>(get_fl_map_value<int64_t>(map, "keyRepeatInterval", 80));
   }
 
   // === Scroll settings ===
@@ -208,8 +212,7 @@ InAppWebViewSettings::InAppWebViewSettings(FlValue* map) : InAppWebViewSettings(
 
   // === CORS allowlist ===
   if (fl_map_contains_not_null(map, "corsAllowlist")) {
-    corsAllowlist =
-        get_fl_map_value<std::vector<std::string>>(map, "corsAllowlist", {});
+    corsAllowlist = get_fl_map_value<std::vector<std::string>>(map, "corsAllowlist", {});
   }
 
   // === ITP (Intelligent Tracking Prevention) ===
@@ -350,7 +353,8 @@ void InAppWebViewSettings::applyToWebView(WebKitWebView* webview) const {
 
   // Security settings
   webkit_settings_set_allow_file_access_from_file_urls(settings, allowFileAccessFromFileURLs);
-  webkit_settings_set_allow_universal_access_from_file_urls(settings, allowUniversalAccessFromFileURLs);
+  webkit_settings_set_allow_universal_access_from_file_urls(settings,
+                                                            allowUniversalAccessFromFileURLs);
   webkit_settings_set_disable_web_security(settings, disableWebSecurity);
   webkit_settings_set_allow_top_navigation_to_data_urls(settings, allowTopNavigationToDataUrls);
 
@@ -370,7 +374,8 @@ void InAppWebViewSettings::applyToWebView(WebKitWebView* webview) const {
   webkit_settings_set_enable_media_capabilities(settings, enableMediaCapabilities);
   webkit_settings_set_enable_mock_capture_devices(settings, enableMockCaptureDevices);
   if (!mediaContentTypesRequiringHardwareSupport.empty()) {
-    webkit_settings_set_media_content_types_requiring_hardware_support(settings, mediaContentTypesRequiringHardwareSupport.c_str());
+    webkit_settings_set_media_content_types_requiring_hardware_support(
+        settings, mediaContentTypesRequiringHardwareSupport.c_str());
   }
 
   // Other settings
@@ -395,8 +400,8 @@ void InAppWebViewSettings::applyWpePlatformSettings(void* display_ptr) const {
 
   // Apply dark mode setting
   if (darkMode.has_value()) {
-    wpe_settings_set_boolean(wpe_settings, WPE_SETTING_DARK_MODE,
-                             darkMode.value(), WPE_SETTINGS_SOURCE_APPLICATION, &error);
+    wpe_settings_set_boolean(wpe_settings, WPE_SETTING_DARK_MODE, darkMode.value(),
+                             WPE_SETTINGS_SOURCE_APPLICATION, &error);
     g_clear_error(&error);
   }
 
@@ -409,8 +414,8 @@ void InAppWebViewSettings::applyWpePlatformSettings(void* display_ptr) const {
 
   // Apply font antialias setting
   if (fontAntialias.has_value()) {
-    wpe_settings_set_boolean(wpe_settings, WPE_SETTING_FONT_ANTIALIAS,
-                             fontAntialias.value(), WPE_SETTINGS_SOURCE_APPLICATION, &error);
+    wpe_settings_set_boolean(wpe_settings, WPE_SETTING_FONT_ANTIALIAS, fontAntialias.value(),
+                             WPE_SETTINGS_SOURCE_APPLICATION, &error);
     g_clear_error(&error);
   }
 
@@ -432,8 +437,8 @@ void InAppWebViewSettings::applyWpePlatformSettings(void* display_ptr) const {
 
   // Apply font DPI
   if (fontDPI.has_value()) {
-    wpe_settings_set_double(wpe_settings, WPE_SETTING_FONT_DPI,
-                            fontDPI.value(), WPE_SETTINGS_SOURCE_APPLICATION, &error);
+    wpe_settings_set_double(wpe_settings, WPE_SETTING_FONT_DPI, fontDPI.value(),
+                            WPE_SETTINGS_SOURCE_APPLICATION, &error);
     g_clear_error(&error);
   }
 
@@ -503,7 +508,8 @@ FlValue* InAppWebViewSettings::toFlValue() const {
       // === WebKit settings ===
       {"userAgent", make_fl_value(userAgent)},
       {"javaScriptEnabled", make_fl_value(javaScriptEnabled)},
-      {"javaScriptCanOpenWindowsAutomatically", make_fl_value(javaScriptCanOpenWindowsAutomatically)},
+      {"javaScriptCanOpenWindowsAutomatically",
+       make_fl_value(javaScriptCanOpenWindowsAutomatically)},
       {"mediaPlaybackRequiresUserGesture", make_fl_value(mediaPlaybackRequiresUserGesture)},
       {"minimumFontSize", make_fl_value(minimumFontSize)},
       {"transparentBackground", make_fl_value(transparentBackground)},
@@ -570,7 +576,8 @@ FlValue* InAppWebViewSettings::toFlValue() const {
       {"enableEncryptedMedia", make_fl_value(enableEncryptedMedia)},
       {"enableMediaCapabilities", make_fl_value(enableMediaCapabilities)},
       {"enableMockCaptureDevices", make_fl_value(enableMockCaptureDevices)},
-      {"mediaContentTypesRequiringHardwareSupport", make_fl_value(mediaContentTypesRequiringHardwareSupport)},
+      {"mediaContentTypesRequiringHardwareSupport",
+       make_fl_value(mediaContentTypesRequiringHardwareSupport)},
 
       // === Other settings ===
       {"enableJavaScriptMarkup", make_fl_value(enableJavaScriptMarkup)},
@@ -606,12 +613,20 @@ FlValue* InAppWebViewSettings::getRealSettings(const InAppWebView* inAppWebView)
 
   return to_fl_map({
       {"userAgent", ua != nullptr ? make_fl_value(std::string(ua)) : fl_value_new_null()},
-      {"javaScriptEnabled", make_fl_value(static_cast<bool>(webkit_settings_get_enable_javascript(settings)))},
-      {"javaScriptCanOpenWindowsAutomatically", make_fl_value(static_cast<bool>(webkit_settings_get_javascript_can_open_windows_automatically(settings)))},
-      {"mediaPlaybackRequiresUserGesture", make_fl_value(static_cast<bool>(webkit_settings_get_media_playback_requires_user_gesture(settings)))},
-      {"minimumFontSize", make_fl_value(static_cast<int64_t>(webkit_settings_get_minimum_font_size(settings)))},
-      {"defaultFontSize", make_fl_value(static_cast<int64_t>(webkit_settings_get_default_font_size(settings)))},
-      {"defaultMonospaceFontSize", make_fl_value(static_cast<int64_t>(webkit_settings_get_default_monospace_font_size(settings)))},
+      {"javaScriptEnabled",
+       make_fl_value(static_cast<bool>(webkit_settings_get_enable_javascript(settings)))},
+      {"javaScriptCanOpenWindowsAutomatically",
+       make_fl_value(static_cast<bool>(
+           webkit_settings_get_javascript_can_open_windows_automatically(settings)))},
+      {"mediaPlaybackRequiresUserGesture",
+       make_fl_value(
+           static_cast<bool>(webkit_settings_get_media_playback_requires_user_gesture(settings)))},
+      {"minimumFontSize",
+       make_fl_value(static_cast<int64_t>(webkit_settings_get_minimum_font_size(settings)))},
+      {"defaultFontSize",
+       make_fl_value(static_cast<int64_t>(webkit_settings_get_default_font_size(settings)))},
+      {"defaultMonospaceFontSize", make_fl_value(static_cast<int64_t>(
+                                       webkit_settings_get_default_monospace_font_size(settings)))},
       {"zoomLevel", make_fl_value(webkit_web_view_get_zoom_level(inAppWebView->webview()))},
   });
 }

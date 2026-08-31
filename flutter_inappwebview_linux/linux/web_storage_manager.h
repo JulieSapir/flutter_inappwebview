@@ -2,10 +2,11 @@
 #define FLUTTER_INAPPWEBVIEW_LINUX_WEB_STORAGE_MANAGER_H_
 
 #include <flutter_linux/flutter_linux.h>
-#include <wpe/webkit.h>
 
 #include <string>
 #include <vector>
+
+#include "webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 
@@ -31,8 +32,7 @@ class WebStorageManager {
   PluginInstance* plugin_ = nullptr;
 
   /// Handle method calls from Flutter.
-  static void HandleMethodCall(FlMethodChannel* channel,
-                               FlMethodCall* method_call,
+  static void HandleMethodCall(FlMethodChannel* channel, FlMethodCall* method_call,
                                gpointer user_data);
 
   /// Fetch website data records.

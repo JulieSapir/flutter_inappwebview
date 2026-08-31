@@ -6,12 +6,16 @@
 
 #include "../utils/flutter.h"
 #include "../utils/log.h"
+#ifndef HAVE_WEBKIT_GTK
+// EGL zero-copy 纹理仅 WPE 后端提供（WebKitGTK 无纹理导出 API）
 #include "inappwebview_egl_texture.h"
+#endif
 #include "inappwebview_texture.h"
 
 namespace flutter_inappwebview_plugin {
 
 namespace {
+#ifndef HAVE_WEBKIT_GTK
 // Check if GL textures should be used (enabled by default, can be disabled)
 // Disable with FLUTTER_INAPPWEBVIEW_LINUX_DISABLE_GL=1 to force software rendering.
 bool UseGLTextureEnvOverride() {
@@ -77,6 +81,7 @@ bool UseGLTexture() {
   }
   return IsOpenGLAvailable();
 }
+#endif  // !HAVE_WEBKIT_GTK
 }  // namespace
 
 CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
@@ -100,6 +105,11 @@ CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
   //
   // The EGL texture handles both EGL and SHM modes internally, providing the best
   // performance for each environment.
+#ifdef HAVE_WEBKIT_GTK
+  // WebKitGTK：snapshot → 像素缓冲纹理（唯一公开渲染导出路径）
+  texture_ = FL_TEXTURE(inappwebview_texture_new(webview_.get()));
+  debugLog("CustomPlatformView: using pixel buffer texture (WebKitGTK snapshot)");
+#else
   if (UseGLTexture()) {
     texture_ = FL_TEXTURE(inappwebview_egl_texture_new(webview_.get()));
     egl_texture_ = INAPPWEBVIEW_EGL_TEXTURE(texture_);
@@ -111,6 +121,7 @@ CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
     texture_ = FL_TEXTURE(inappwebview_texture_new(webview_.get()));
     debugLog("CustomPlatformView: using pixel buffer texture (software)");
   }
+#endif
 
   if (texture_ == nullptr) {
     errorLog("CustomPlatformView: failed to create texture");
@@ -139,6 +150,7 @@ CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
   // Set up the webview's callback to mark frame available
   // For EGL texture, we also update the EGL image reference
   webview_->SetOnFrameAvailable([this]() {
+#ifndef HAVE_WEBKIT_GTK
     // If using EGL texture, update the EGL image reference before marking available
     if (egl_texture_ != nullptr && webview_ != nullptr) {
       uint32_t width = 0;
@@ -148,6 +160,7 @@ CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
         inappwebview_egl_texture_set_egl_image(egl_texture_, egl_image, width, height);
       }
     }
+#endif
     MarkTextureFrameAvailable();
   });
 

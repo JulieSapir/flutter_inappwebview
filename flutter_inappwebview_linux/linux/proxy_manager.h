@@ -2,7 +2,6 @@
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_PROXY_MANAGER_H_
 
 #include <flutter_linux/flutter_linux.h>
-#include <wpe/webkit.h>
 
 #include <memory>
 #include <optional>
@@ -10,6 +9,7 @@
 #include <vector>
 
 #include "types/channel_delegate.h"
+#include "webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 

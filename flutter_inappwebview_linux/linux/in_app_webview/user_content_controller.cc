@@ -5,7 +5,7 @@
 
 #include "user_content_controller.h"
 
-#include <jsc/jsc.h>
+#include <jsc/jsc.h>  // jsc 头路径 WPE/GTK 一致
 
 #include <algorithm>
 #include <nlohmann/json.hpp>
@@ -32,12 +32,10 @@ UserContentController::~UserContentController() {
   // Unregister all message handlers
   if (manager_valid) {
     for (const auto& name : registered_message_handlers_) {
-      webkit_user_content_manager_unregister_script_message_handler(content_manager_, name.c_str(),
-                                                                    nullptr);
+      webkit_compat_unregister_script_message_handler(content_manager_, name.c_str(), nullptr);
     }
     for (const auto& name : registered_message_handlers_with_reply_) {
-      webkit_user_content_manager_unregister_script_message_handler(content_manager_, name.c_str(),
-                                                                    nullptr);
+      webkit_compat_unregister_script_message_handler(content_manager_, name.c_str(), nullptr);
     }
   }
   registered_message_handlers_.clear();
@@ -163,9 +161,9 @@ void UserContentController::registerScriptMessageHandler(const std::string& name
   // Connect the signal
   g_signal_connect(content_manager_, signalName.c_str(), G_CALLBACK(onScriptMessageReceived), this);
 
-  // Register the handler with WebKit (WPE API since 2.40)
-  gboolean success = webkit_user_content_manager_register_script_message_handler(
-      content_manager_, name.c_str(), nullptr);
+  // Register the handler with WebKit (WPE API since 2.40; GTK maps via compat)
+  gboolean success =
+      webkit_compat_register_script_message_handler(content_manager_, name.c_str(), nullptr);
 
   if (!success) {
     errorLog("UserContentController: Failed to register message handler " + name);
@@ -175,8 +173,8 @@ void UserContentController::registerScriptMessageHandler(const std::string& name
   registered_message_handlers_.push_back(name);
 }
 
-void UserContentController::setScriptMessageWithReplyHandler(const std::string& name,
-                                                             ScriptMessageWithReplyHandler handler) {
+void UserContentController::setScriptMessageWithReplyHandler(
+    const std::string& name, ScriptMessageWithReplyHandler handler) {
   script_message_with_reply_handlers_[name] = handler;
 }
 
@@ -294,7 +292,8 @@ void UserContentController::onScriptMessageReceived(WebKitUserContentManager* ma
   if (jsonStr != nullptr) {
     // The handler name is extracted from the signal name by WebKit,
     // but for our purposes we need to get it from the message body
-    // Pass the JSCContext so internal handlers can resolve Promises in the correct frame (iframe support)
+    // Pass the JSCContext so internal handlers can resolve Promises in the correct frame (iframe
+    // support)
     self->script_message_handler_("callHandler", std::string(jsonStr), jscContext);
     g_free(jsonStr);
   }
@@ -368,11 +367,10 @@ void UserContentController::rebuildScripts() {
   }
 }
 
-gboolean UserContentController::onScriptMessageWithReplyReceived(
-    WebKitUserContentManager* manager,
-    JSCValue* value,
-    WebKitScriptMessageReply* reply,
-    gpointer user_data) {
+gboolean UserContentController::onScriptMessageWithReplyReceived(WebKitUserContentManager* manager,
+                                                                 JSCValue* value,
+                                                                 WebKitScriptMessageReply* reply,
+                                                                 gpointer user_data) {
   auto* self = static_cast<UserContentController*>(user_data);
 
   if (self == nullptr) {
@@ -418,14 +416,14 @@ gboolean UserContentController::onScriptMessageWithReplyReceived(
   // The signal detail contains the WebKit handler name (e.g., "callHandler")
   // We need to try all registered handlers since we can't easily extract the detail
   // The "callHandler" handler is the main one that handles all JavaScript bridge calls
-  
+
   // First try to find the handler using the handlerName from the JSON body
   // This is for backwards compatibility with handlers that use different names
   try {
     json body = json::parse(jsonBody);
     if (body.contains("handlerName") && body["handlerName"].is_string()) {
       std::string handlerName = body["handlerName"].get<std::string>();
-      
+
       auto it = self->script_message_with_reply_handlers_.find(handlerName);
       if (it != self->script_message_with_reply_handlers_.end()) {
         bool handled = it->second(jsonBody, reply);
@@ -435,7 +433,7 @@ gboolean UserContentController::onScriptMessageWithReplyReceived(
   } catch (const std::exception& e) {
     // Ignore parse errors, try fallback
   }
-  
+
   // Fallback: If "callHandler" is registered, use it as the main handler
   // This is the primary path for the JavaScript bridge
   auto callHandlerIt = self->script_message_with_reply_handlers_.find("callHandler");

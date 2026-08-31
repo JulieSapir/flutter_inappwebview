@@ -2,7 +2,6 @@
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_WEBVIEW_ENVIRONMENT_H_
 
 #include <flutter_linux/flutter_linux.h>
-#include <wpe/webkit.h>
 
 #include <functional>
 #include <map>
@@ -10,6 +9,7 @@
 #include <string>
 
 #include "types/channel_delegate.h"
+#include "webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 
@@ -21,9 +21,9 @@ class PluginInstance;
  */
 class WebViewEnvironmentInstanceChannelDelegate : public ChannelDelegate {
  public:
-  WebViewEnvironmentInstanceChannelDelegate(FlBinaryMessenger* messenger,
-                                            const std::string& id,
-                                            std::function<void(const std::string&)> disposeCallback);
+  WebViewEnvironmentInstanceChannelDelegate(
+      FlBinaryMessenger* messenger, const std::string& id,
+      std::function<void(const std::string&)> disposeCallback);
   ~WebViewEnvironmentInstanceChannelDelegate() override;
 
   void HandleMethodCall(FlMethodCall* method_call) override;

@@ -1,8 +1,8 @@
 #include "in_app_browser.h"
 
-#include <gdk/gdk.h>
-#include <epoxy/gl.h>
 #include <epoxy/egl.h>
+#include <epoxy/gl.h>
+#include <gdk/gdk.h>
 
 #include "../plugin_instance.h"
 #include "../utils/flutter.h"
@@ -18,7 +18,7 @@ static std::string ConvertColorToGtkCss(const std::string& color) {
   if (color.empty()) {
     return color;
   }
-  
+
   // Handle #AARRGGBB format (9 chars including #)
   if (color.length() == 9 && color[0] == '#') {
     // Extract components: #AARRGGBB
@@ -26,19 +26,19 @@ static std::string ConvertColorToGtkCss(const std::string& color) {
     std::string rr = color.substr(3, 2);
     std::string gg = color.substr(5, 2);
     std::string bb = color.substr(7, 2);
-    
+
     // Parse hex values
     int a = std::stoi(aa, nullptr, 16);
     int r = std::stoi(rr, nullptr, 16);
     int g = std::stoi(gg, nullptr, 16);
     int b = std::stoi(bb, nullptr, 16);
-    
+
     // Return rgba() format
     char buffer[64];
     snprintf(buffer, sizeof(buffer), "rgba(%d, %d, %d, %.3f)", r, g, b, a / 255.0);
     return std::string(buffer);
   }
-  
+
   // Return as-is for other formats (#RGB, #RRGGBB, rgb(), rgba(), etc.)
   return color;
 }
@@ -275,7 +275,8 @@ void InAppBrowser::setupToolbar() {
     urlEntry_ = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(urlEntry_), "Enter URL...");
     gtk_widget_set_hexpand(urlEntry_, TRUE);
-    gtk_entry_set_icon_from_icon_name(GTK_ENTRY(urlEntry_), GTK_ENTRY_ICON_PRIMARY, "globe-symbolic");
+    gtk_entry_set_icon_from_icon_name(GTK_ENTRY(urlEntry_), GTK_ENTRY_ICON_PRIMARY,
+                                      "globe-symbolic");
     g_signal_connect(urlEntry_, "activate", G_CALLBACK(OnUrlEntryActivated), this);
     gtk_header_bar_set_custom_title(GTK_HEADER_BAR(headerBar_), urlEntry_);
   }
@@ -313,12 +314,11 @@ void InAppBrowser::setupToolbar() {
 
     // Style the progress bar to be thin
     GtkCssProvider* provider = gtk_css_provider_new();
-    gtk_css_provider_load_from_data(
-        provider,
-        "progressbar { min-height: 3px; } "
-        "progressbar trough { min-height: 3px; } "
-        "progressbar progress { min-height: 3px; }",
-        -1, nullptr);
+    gtk_css_provider_load_from_data(provider,
+                                    "progressbar { min-height: 3px; } "
+                                    "progressbar trough { min-height: 3px; } "
+                                    "progressbar progress { min-height: 3px; }",
+                                    -1, nullptr);
     GtkStyleContext* context = gtk_widget_get_style_context(progressBar_);
     gtk_style_context_add_provider(context, GTK_STYLE_PROVIDER(provider),
                                    GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -327,6 +327,12 @@ void InAppBrowser::setupToolbar() {
 }
 
 void InAppBrowser::setupDrawingArea() {
+#ifdef HAVE_WEBKIT_GTK
+  // WebKitGTK：webview widget 本身就是原生渲染者（含输入/IME/右键菜单），
+  // 无需 GL area/drawing area 中转；widget 由 setupWebView 挂载。
+  useGlRendering_ = false;
+  return;
+#else
   // Try to use GtkGLArea for hardware-accelerated zero-copy rendering
   // This provides better performance by avoiding GPU->CPU->GPU copies
   bool canUseGl = InAppWebView::IsWpeWebKitAvailable();
@@ -342,12 +348,11 @@ void InAppBrowser::setupDrawingArea() {
     gtk_gl_area_set_use_es(GTK_GL_AREA(glArea_), TRUE);
 
     // Enable events
-    gtk_widget_add_events(glArea_,
-                          GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
-                              GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK |
-                              GDK_SMOOTH_SCROLL_MASK | GDK_KEY_PRESS_MASK |
-                              GDK_KEY_RELEASE_MASK | GDK_FOCUS_CHANGE_MASK |
-                              GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
+    gtk_widget_add_events(glArea_, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
+                                       GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK |
+                                       GDK_SMOOTH_SCROLL_MASK | GDK_KEY_PRESS_MASK |
+                                       GDK_KEY_RELEASE_MASK | GDK_FOCUS_CHANGE_MASK |
+                                       GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
 
     // Connect GL-specific signals
     g_signal_connect(glArea_, "realize", G_CALLBACK(OnGlAreaRealize), this);
@@ -375,6 +380,7 @@ void InAppBrowser::setupDrawingArea() {
     // Fall back to original GtkDrawingArea implementation
     setupDrawingAreaFallback();
   }
+#endif  // HAVE_WEBKIT_GTK
 }
 
 void InAppBrowser::setupDrawingAreaFallback() {
@@ -385,11 +391,11 @@ void InAppBrowser::setupDrawingAreaFallback() {
   gtk_widget_set_vexpand(drawingArea_, TRUE);
 
   // Enable events
-  gtk_widget_add_events(drawingArea_,
-                        GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK |
-                            GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK | GDK_KEY_PRESS_MASK |
-                            GDK_KEY_RELEASE_MASK | GDK_FOCUS_CHANGE_MASK | GDK_ENTER_NOTIFY_MASK |
-                            GDK_LEAVE_NOTIFY_MASK);
+  gtk_widget_add_events(drawingArea_, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
+                                          GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK |
+                                          GDK_SMOOTH_SCROLL_MASK | GDK_KEY_PRESS_MASK |
+                                          GDK_KEY_RELEASE_MASK | GDK_FOCUS_CHANGE_MASK |
+                                          GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
 
   // Connect signals
   g_signal_connect(drawingArea_, "draw", G_CALLBACK(OnDrawingAreaDraw), this);
@@ -427,6 +433,9 @@ void InAppBrowser::setupWebView(const InAppBrowserCreationParams& params) {
   webViewParams.gtkWindow = window_;
   webViewParams.initialSettings = params.initialWebViewSettings;
   webViewParams.contextMenu = params.contextMenu;
+#ifdef HAVE_WEBKIT_GTK
+  webViewParams.hostInBrowserWindow = true;
+#endif
 
   if (params.initialUserScripts.has_value()) {
     webViewParams.initialUserScripts = params.initialUserScripts.value();
@@ -453,6 +462,13 @@ void InAppBrowser::setupWebView(const InAppBrowserCreationParams& params) {
   // Set initial size (will be updated on realize)
   webView_->setSize(800, 600);
 
+#ifdef HAVE_WEBKIT_GTK
+  // WebKitGTK：webview widget 直接挂载到浏览器窗口（原生渲染/输入/IME）。
+  // 注意 widget 父容器唯一：browser 场景已跳过 InitGtkHost 离屏宿主。
+  gtk_box_pack_start(GTK_BOX(contentBox_), GTK_WIDGET(webView_->webview()), TRUE, TRUE, 0);
+  gtk_widget_show(GTK_WIDGET(webView_->webview()));
+#endif
+
   // Set up frame callback - uses GL queue_render for GPU path, scheduleFrame for CPU path
   webView_->SetOnFrameAvailable([this]() {
     if (useGlRendering_ && glArea_ != nullptr) {
@@ -463,19 +479,14 @@ void InAppBrowser::setupWebView(const InAppBrowserCreationParams& params) {
   });
 
   // Set up cursor change callback
-  webView_->SetOnCursorChanged([this](const std::string& cursorName) {
-    OnCursorChanged(cursorName);
-  });
+  webView_->SetOnCursorChanged(
+      [this](const std::string& cursorName) { OnCursorChanged(cursorName); });
 
   // Set up progress change callback for progress bar
-  webView_->SetOnProgressChanged([this](double progress) {
-    didChangeProgress(progress);
-  });
+  webView_->SetOnProgressChanged([this](double progress) { didChangeProgress(progress); });
 
   // Set up navigation state change callback for back/forward buttons
-  webView_->SetOnNavigationStateChanged([this]() {
-    didChangeNavigationState();
-  });
+  webView_->SetOnNavigationStateChanged([this]() { didChangeNavigationState(); });
 
   // Load initial content
   loadInitialContent(params);
@@ -719,11 +730,11 @@ static int ConvertGdkModifiersToWpe(guint gdkState) {
   int wpeModifiers = 0;
   if (gdkState & GDK_CONTROL_MASK)  // GDK bit 2 -> WPE bit 0
     wpeModifiers |= 1;
-  if (gdkState & GDK_SHIFT_MASK)    // GDK bit 0 -> WPE bit 1
+  if (gdkState & GDK_SHIFT_MASK)  // GDK bit 0 -> WPE bit 1
     wpeModifiers |= 2;
-  if (gdkState & GDK_MOD1_MASK)     // GDK bit 3 (Alt) -> WPE bit 2
+  if (gdkState & GDK_MOD1_MASK)  // GDK bit 3 (Alt) -> WPE bit 2
     wpeModifiers |= 4;
-  if (gdkState & GDK_MOD4_MASK)     // GDK bit 6 (Super/Meta) -> WPE bit 3
+  if (gdkState & GDK_MOD4_MASK)  // GDK bit 6 (Super/Meta) -> WPE bit 3
     wpeModifiers |= 8;
   return wpeModifiers;
 }
@@ -734,8 +745,8 @@ static void ConvertRGBAToBGRA(uint8_t* buffer, size_t size) {
   for (size_t i = 0; i + 3 < size; i += 4) {
     // Swap R and B channels
     uint8_t r = buffer[i];
-    buffer[i] = buffer[i + 2];     // B
-    buffer[i + 2] = r;              // R
+    buffer[i] = buffer[i + 2];  // B
+    buffer[i + 2] = r;          // R
     // G and A stay in place
   }
 }
@@ -825,8 +836,8 @@ gboolean InAppBrowser::OnDrawingAreaDraw(GtkWidget* widget, cairo_t* cr, gpointe
   ConvertRGBAToBGRA(buffer.data(), bufferSize);
 
   // Create Cairo surface from pixel buffer (BGRA format)
-  cairo_surface_t* surface = cairo_image_surface_create_for_data(
-      buffer.data(), CAIRO_FORMAT_ARGB32, width, height, width * 4);
+  cairo_surface_t* surface = cairo_image_surface_create_for_data(buffer.data(), CAIRO_FORMAT_ARGB32,
+                                                                 width, height, width * 4);
 
   if (cairo_surface_status(surface) == CAIRO_STATUS_SUCCESS) {
     // Scale to fit drawing area
@@ -1002,7 +1013,7 @@ void InAppBrowser::OnMenuItemActivated(GtkMenuItem* item, gpointer user_data) {
 }
 
 void InAppBrowser::OnDrawingAreaSizeAllocate(GtkWidget* widget, GdkRectangle* allocation,
-                                              gpointer user_data) {
+                                             gpointer user_data) {
   auto* browser = static_cast<InAppBrowser*>(user_data);
   if (browser && browser->webView_ && allocation) {
     browser->webView_->setSize(allocation->width, allocation->height);
@@ -1010,7 +1021,7 @@ void InAppBrowser::OnDrawingAreaSizeAllocate(GtkWidget* widget, GdkRectangle* al
 }
 
 gboolean InAppBrowser::OnDrawingAreaFocusIn(GtkWidget* widget, GdkEventFocus* event,
-                                             gpointer user_data) {
+                                            gpointer user_data) {
   auto* browser = static_cast<InAppBrowser*>(user_data);
   if (browser && browser->webView_) {
     browser->webView_->setFocused(true);
@@ -1019,7 +1030,7 @@ gboolean InAppBrowser::OnDrawingAreaFocusIn(GtkWidget* widget, GdkEventFocus* ev
 }
 
 gboolean InAppBrowser::OnDrawingAreaFocusOut(GtkWidget* widget, GdkEventFocus* event,
-                                              gpointer user_data) {
+                                             gpointer user_data) {
   auto* browser = static_cast<InAppBrowser*>(user_data);
   if (browser && browser->webView_) {
     browser->webView_->setFocused(false);
@@ -1042,13 +1053,13 @@ void InAppBrowser::OnDrawingAreaUnmap(GtkWidget* widget, gpointer user_data) {
 }
 
 gboolean InAppBrowser::OnDrawingAreaEnterNotify(GtkWidget* widget, GdkEventCrossing* event,
-                                                 gpointer user_data) {
+                                                gpointer user_data) {
   // Mouse entered the drawing area - no special action needed
   return FALSE;
 }
 
 gboolean InAppBrowser::OnDrawingAreaLeaveNotify(GtkWidget* widget, GdkEventCrossing* event,
-                                                 gpointer user_data) {
+                                                gpointer user_data) {
   auto* browser = static_cast<InAppBrowser*>(user_data);
   if (browser) {
     // Reset cursor to default when leaving the drawing area
@@ -1165,15 +1176,23 @@ void InAppBrowser::OnGlAreaRealize(GtkGLArea* area, gpointer user_data) {
   // Order: top-left, top-right, bottom-left, bottom-right
   static const GLfloat vertexData[] = {
       // Positions (8 floats)
-      -1.0f,  1.0f,  // Top-left
-       1.0f,  1.0f,  // Top-right
-      -1.0f, -1.0f,  // Bottom-left
-       1.0f, -1.0f,  // Bottom-right
-      // Texture coordinates (8 floats) - Y flipped for correct orientation
-       0.0f,  0.0f,  // Top-left
-       1.0f,  0.0f,  // Top-right
-       0.0f,  1.0f,  // Bottom-left
-       1.0f,  1.0f,  // Bottom-right
+      -1.0f,
+      1.0f,  // Top-left
+      1.0f,
+      1.0f,  // Top-right
+      -1.0f,
+      -1.0f,  // Bottom-left
+      1.0f,
+      -1.0f,  // Bottom-right
+              // Texture coordinates (8 floats) - Y flipped for correct orientation
+      0.0f,
+      0.0f,  // Top-left
+      1.0f,
+      0.0f,  // Top-right
+      0.0f,
+      1.0f,  // Bottom-left
+      1.0f,
+      1.0f,  // Bottom-right
   };
 
   glGenBuffers(1, &browser->glVBO_);
@@ -1190,8 +1209,7 @@ void InAppBrowser::OnGlAreaRealize(GtkGLArea* area, gpointer user_data) {
   }
 }
 
-gboolean InAppBrowser::OnGlAreaRender(GtkGLArea* area, GdkGLContext* context,
-                                       gpointer user_data) {
+gboolean InAppBrowser::OnGlAreaRender(GtkGLArea* area, GdkGLContext* context, gpointer user_data) {
   auto* browser = static_cast<InAppBrowser*>(user_data);
 
   if (!browser || browser->destroyed_ || !browser->webView_ || !browser->glInitialized_) {
@@ -1206,11 +1224,11 @@ gboolean InAppBrowser::OnGlAreaRender(GtkGLArea* area, GdkGLContext* context,
   GtkAllocation alloc;
   gtk_widget_get_allocation(GTK_WIDGET(area), &alloc);
   gint scaleFactor = gtk_widget_get_scale_factor(GTK_WIDGET(area));
-  
+
   // For high-DPI displays, the actual framebuffer is larger
   int fbWidth = alloc.width * scaleFactor;
   int fbHeight = alloc.height * scaleFactor;
-  
+
   glViewport(0, 0, fbWidth, fbHeight);
 
   // Try to get EGL image for zero-copy rendering
@@ -1241,19 +1259,16 @@ gboolean InAppBrowser::OnGlAreaRender(GtkGLArea* area, GdkGLContext* context,
       glBindBuffer(GL_ARRAY_BUFFER, browser->glVBO_);
 
       // Position attribute: 2 floats, stride 0 (tightly packed), offset 0
-      glVertexAttribPointer(browser->glAttribPosition_, 2, GL_FLOAT, GL_FALSE,
-                            0, (void*)0);
+      glVertexAttribPointer(browser->glAttribPosition_, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
       glEnableVertexAttribArray(browser->glAttribPosition_);
 
       // Texture attribute: 2 floats, stride 0, offset = 4 positions * 2 floats = 8 floats
-      glVertexAttribPointer(browser->glAttribTexture_, 2, GL_FLOAT, GL_FALSE,
-                            0, (void*)(8 * sizeof(GLfloat)));
+      glVertexAttribPointer(browser->glAttribTexture_, 2, GL_FLOAT, GL_FALSE, 0,
+                            (void*)(8 * sizeof(GLfloat)));
       glEnableVertexAttribArray(browser->glAttribTexture_);
 
       // Draw fullscreen quad as triangle strip
       glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-
 
       // Cleanup state
       glDisableVertexAttribArray(browser->glAttribPosition_);
@@ -1270,8 +1285,7 @@ gboolean InAppBrowser::OnGlAreaRender(GtkGLArea* area, GdkGLContext* context,
   return browser->RenderFromPixelBuffer(area);
 }
 
-void InAppBrowser::OnGlAreaResize(GtkGLArea* area, gint width, gint height,
-                                   gpointer user_data) {
+void InAppBrowser::OnGlAreaResize(GtkGLArea* area, gint width, gint height, gpointer user_data) {
   auto* browser = static_cast<InAppBrowser*>(user_data);
   if (browser && browser->webView_ && width > 0 && height > 0) {
     // GtkGLArea resize signal provides physical pixel dimensions
@@ -1286,7 +1300,7 @@ void InAppBrowser::OnGlAreaResize(GtkGLArea* area, gint width, gint height,
 }
 
 void InAppBrowser::OnGlAreaSizeAllocate(GtkWidget* widget, GdkRectangle* allocation,
-                                         gpointer user_data) {
+                                        gpointer user_data) {
   auto* browser = static_cast<InAppBrowser*>(user_data);
   if (browser && browser->webView_ && allocation) {
     if (allocation->width > 0 && allocation->height > 0) {
@@ -1329,14 +1343,14 @@ gboolean InAppBrowser::RenderFromPixelBuffer(GtkGLArea* area) {
   gint scaleFactor = gtk_widget_get_scale_factor(GTK_WIDGET(area));
   int fbWidth = alloc.width * scaleFactor;
   int fbHeight = alloc.height * scaleFactor;
-  
+
   glViewport(0, 0, fbWidth, fbHeight);
 
   // Upload pixel buffer to texture
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, glTexture_);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
-               GL_RGBA, GL_UNSIGNED_BYTE, buffer.data());
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+               buffer.data());
 
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -1351,13 +1365,11 @@ gboolean InAppBrowser::RenderFromPixelBuffer(GtkGLArea* area) {
   glBindBuffer(GL_ARRAY_BUFFER, glVBO_);
 
   // Position attribute: 2 floats, stride 0 (tightly packed), offset 0
-  glVertexAttribPointer(glAttribPosition_, 2, GL_FLOAT, GL_FALSE,
-                        0, (void*)0);
+  glVertexAttribPointer(glAttribPosition_, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
   glEnableVertexAttribArray(glAttribPosition_);
 
   // Texture attribute: 2 floats, stride 0, offset = 4 positions * 2 floats = 8 floats
-  glVertexAttribPointer(glAttribTexture_, 2, GL_FLOAT, GL_FALSE,
-                        0, (void*)(8 * sizeof(GLfloat)));
+  glVertexAttribPointer(glAttribTexture_, 2, GL_FLOAT, GL_FALSE, 0, (void*)(8 * sizeof(GLfloat)));
   glEnableVertexAttribArray(glAttribTexture_);
 
   // Draw fullscreen quad as triangle strip

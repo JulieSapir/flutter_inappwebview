@@ -599,9 +599,12 @@ class _CustomPlatformViewState extends State<CustomPlatformView> {
                 },
                 onPointerSignal: (signal) {
                   if (signal is PointerScrollEvent) {
+                    // Flutter 与 GDK/WPE smooth scroll 语义同向：正值 = scroll
+                    // down（视口向文档下方移动）。此前取负导致三个后端滚轮方向
+                    // 全部反转，且与下方触控板 panDelta 传正值的行为不一致。
                     _controller._setScrollDelta(
-                      -signal.scrollDelta.dx,
-                      -signal.scrollDelta.dy,
+                      signal.scrollDelta.dx,
+                      signal.scrollDelta.dy,
                     );
                   }
                 },

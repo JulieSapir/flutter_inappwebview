@@ -1,10 +1,10 @@
 #include "option_menu_popup.h"
 
-#include <wpe/webkit.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+
+#include "../webkit_include.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -39,9 +39,9 @@ OptionMenuPopup::OptionMenuPopup(GtkWindow* parent_window) : parent_window_(pare
   gtk_container_add(GTK_CONTAINER(popup_window_), drawing_area_);
 
   // Enable events on drawing area
-  gtk_widget_add_events(drawing_area_,
-                        GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK |
-                            GDK_LEAVE_NOTIFY_MASK | GDK_SCROLL_MASK | GDK_KEY_PRESS_MASK);
+  gtk_widget_add_events(drawing_area_, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
+                                           GDK_POINTER_MOTION_MASK | GDK_LEAVE_NOTIFY_MASK |
+                                           GDK_SCROLL_MASK | GDK_KEY_PRESS_MASK);
 
   // Connect signals for drawing area
   g_signal_connect(drawing_area_, "draw", G_CALLBACK(OnDraw), this);
@@ -78,16 +78,16 @@ void OptionMenuPopup::SetOptionMenu(WebKitOptionMenu* menu) {
 void OptionMenuPopup::UpdateItems() {
   items_.clear();
   initially_selected_index_ = -1;
-  
+
   if (webkit_menu_ == nullptr) {
     return;
   }
-  
+
   guint n_items = webkit_option_menu_get_n_items(webkit_menu_);
-  
+
   for (guint i = 0; i < n_items; i++) {
     WebKitOptionMenuItem* item = webkit_option_menu_get_item(webkit_menu_, i);
-    
+
     MenuItem menu_item;
     const gchar* label = webkit_option_menu_item_get_label(item);
     menu_item.label = label ? label : "";
@@ -95,11 +95,11 @@ void OptionMenuPopup::UpdateItems() {
     menu_item.selected = webkit_option_menu_item_is_selected(item);
     menu_item.is_group_label = webkit_option_menu_item_is_group_label(item);
     menu_item.is_group_child = webkit_option_menu_item_is_group_child(item);
-    
+
     if (menu_item.selected && menu_item.enabled && !menu_item.is_group_label) {
       initially_selected_index_ = static_cast<int>(i);
     }
-    
+
     items_.push_back(std::move(menu_item));
   }
 }
@@ -130,8 +130,8 @@ void OptionMenuPopup::UpdateSize() {
   cairo_surface_destroy(surface);
 
   // Add padding for margins
-  width_ = std::max(MENU_MIN_WIDTH, std::min(MENU_MAX_WIDTH, 
-                                              max_text_width + MENU_HORIZONTAL_PADDING * 4));
+  width_ = std::max(MENU_MIN_WIDTH,
+                    std::min(MENU_MAX_WIDTH, max_text_width + MENU_HORIZONTAL_PADDING * 4));
 
   // Calculate content height
   content_height_ = 0;
@@ -154,7 +154,7 @@ void OptionMenuPopup::Show(int x, int y, int min_width) {
   }
 
   UpdateSize();
-  
+
   // Use the HTML <select> element's width if provided (ensures menu matches element width)
   if (min_width > 0) {
     width_ = min_width;
@@ -216,10 +216,10 @@ void OptionMenuPopup::Show(int x, int y, int min_width) {
   gtk_window_set_position(GTK_WINDOW(popup_window_), GTK_WIN_POS_NONE);
   gtk_widget_show(popup_window_);
   gtk_window_move(GTK_WINDOW(popup_window_), x, y);
-  
+
   // Grab keyboard focus
   gtk_widget_grab_focus(drawing_area_);
-  
+
   visible_ = true;
 
   // Scroll to initially selected item
@@ -229,8 +229,8 @@ void OptionMenuPopup::Show(int x, int y, int min_width) {
 
   // Connect to parent window as fallback for clicks outside Flutter area
   if (parent_window_ != nullptr && parent_button_handler_id_ == 0) {
-    parent_button_handler_id_ = g_signal_connect(
-        parent_window_, "button-press-event", G_CALLBACK(OnParentButtonPress), this);
+    parent_button_handler_id_ = g_signal_connect(parent_window_, "button-press-event",
+                                                 G_CALLBACK(OnParentButtonPress), this);
   }
 }
 
@@ -261,7 +261,7 @@ void OptionMenuPopup::ScrollToItem(int index) {
   if (index < 0 || index >= static_cast<int>(items_.size())) {
     return;
   }
-  
+
   // Calculate y position of item
   int item_y = 0;
   for (int i = 0; i < index; i++) {
@@ -271,9 +271,9 @@ void OptionMenuPopup::ScrollToItem(int index) {
       item_y += MENU_ITEM_HEIGHT;
     }
   }
-  
+
   int visible_height = height_ - MENU_VERTICAL_PADDING * 2;
-  
+
   // If item is above visible area, scroll up
   if (item_y < scroll_offset_) {
     scroll_offset_ = item_y;
@@ -282,10 +282,9 @@ void OptionMenuPopup::ScrollToItem(int index) {
   else if (item_y + MENU_ITEM_HEIGHT > scroll_offset_ + visible_height) {
     scroll_offset_ = item_y + MENU_ITEM_HEIGHT - visible_height;
   }
-  
+
   // Clamp scroll
-  scroll_offset_ = std::max(0, std::min(scroll_offset_, 
-                                         content_height_ - visible_height));
+  scroll_offset_ = std::max(0, std::min(scroll_offset_, content_height_ - visible_height));
 }
 
 int OptionMenuPopup::GetItemAtPosition(int x, int y) const {
@@ -295,7 +294,7 @@ int OptionMenuPopup::GetItemAtPosition(int x, int y) const {
 
   int adjusted_y = y - MENU_VERTICAL_PADDING + scroll_offset_;
   int current_y = 0;
-  
+
   for (size_t i = 0; i < items_.size(); ++i) {
     int item_height = items_[i].is_group_label ? MENU_GROUP_LABEL_HEIGHT : MENU_ITEM_HEIGHT;
 
@@ -346,8 +345,8 @@ gboolean OptionMenuPopup::OnDraw(GtkWidget* widget, cairo_t* cr, gpointer user_d
 
   // Set up clipping for content area
   cairo_save(cr);
-  cairo_rectangle(cr, 0, MENU_VERTICAL_PADDING, 
-                  self->width_, self->height_ - MENU_VERTICAL_PADDING * 2);
+  cairo_rectangle(cr, 0, MENU_VERTICAL_PADDING, self->width_,
+                  self->height_ - MENU_VERTICAL_PADDING * 2);
   cairo_clip(cr);
 
   // Draw items
@@ -355,7 +354,7 @@ gboolean OptionMenuPopup::OnDraw(GtkWidget* widget, cairo_t* cr, gpointer user_d
   cairo_set_font_size(cr, MENU_ITEM_TEXT_SIZE);
 
   int current_y = MENU_VERTICAL_PADDING - self->scroll_offset_;
-  
+
   for (size_t i = 0; i < self->items_.size(); ++i) {
     const auto& item = self->items_[i];
     int item_height = item.is_group_label ? MENU_GROUP_LABEL_HEIGHT : MENU_ITEM_HEIGHT;
@@ -372,7 +371,7 @@ gboolean OptionMenuPopup::OnDraw(GtkWidget* widget, cairo_t* cr, gpointer user_d
     if (item.is_group_label) {
       // Draw group label (bold, no selection)
       cairo_set_source_rgba(cr, 0.4, 0.4, 0.4, 1.0);
-      
+
       cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
       cairo_move_to(cr, MENU_HORIZONTAL_PADDING, current_y + item_height - 8);
       cairo_show_text(cr, item.label.c_str());
@@ -425,7 +424,7 @@ gboolean OptionMenuPopup::OnDraw(GtkWidget* widget, cairo_t* cr, gpointer user_d
       cairo_close_path(cr);
       cairo_fill(cr);
     }
-    
+
     // Bottom scroll indicator
     if (self->scroll_offset_ < self->content_height_ - visible_height) {
       cairo_set_source_rgba(cr, 0.5, 0.5, 0.5, 0.8);
@@ -441,7 +440,7 @@ gboolean OptionMenuPopup::OnDraw(GtkWidget* widget, cairo_t* cr, gpointer user_d
 }
 
 gboolean OptionMenuPopup::OnButtonPress(GtkWidget* widget, GdkEventButton* event,
-                                         gpointer user_data) {
+                                        gpointer user_data) {
   auto* self = static_cast<OptionMenuPopup*>(user_data);
 
   // Get screen coordinates of the click
@@ -471,27 +470,28 @@ gboolean OptionMenuPopup::OnButtonPress(GtkWidget* widget, GdkEventButton* event
 }
 
 gboolean OptionMenuPopup::OnButtonRelease(GtkWidget* widget, GdkEventButton* event,
-                                           gpointer user_data) {
+                                          gpointer user_data) {
   auto* self = static_cast<OptionMenuPopup*>(user_data);
 
   if (event->button == 1) {
     int index = self->GetItemAtPosition(static_cast<int>(event->x), static_cast<int>(event->y));
 
-    if (index >= 0 && index == self->pressed_index_ && index < static_cast<int>(self->items_.size())) {
+    if (index >= 0 && index == self->pressed_index_ &&
+        index < static_cast<int>(self->items_.size())) {
       const auto& item = self->items_[index];
       if (item.enabled && !item.is_group_label) {
         int selected_index = index;
-        
+
         // Clear dismissed callback since we're selecting an item
         auto item_callback = self->item_selected_callback_;
         self->dismissed_callback_ = nullptr;
-        
+
         self->Hide();
 
         if (item_callback) {
           item_callback(selected_index);
         }
-        
+
         return TRUE;
       }
     }
@@ -502,7 +502,7 @@ gboolean OptionMenuPopup::OnButtonRelease(GtkWidget* widget, GdkEventButton* eve
 }
 
 gboolean OptionMenuPopup::OnMotionNotify(GtkWidget* widget, GdkEventMotion* event,
-                                          gpointer user_data) {
+                                         gpointer user_data) {
   auto* self = static_cast<OptionMenuPopup*>(user_data);
 
   int index = self->GetItemAtPosition(static_cast<int>(event->x), static_cast<int>(event->y));
@@ -516,7 +516,7 @@ gboolean OptionMenuPopup::OnMotionNotify(GtkWidget* widget, GdkEventMotion* even
 }
 
 gboolean OptionMenuPopup::OnLeaveNotify(GtkWidget* widget, GdkEventCrossing* event,
-                                         gpointer user_data) {
+                                        gpointer user_data) {
   auto* self = static_cast<OptionMenuPopup*>(user_data);
 
   if (self->hovered_index_ >= 0) {
@@ -527,15 +527,14 @@ gboolean OptionMenuPopup::OnLeaveNotify(GtkWidget* widget, GdkEventCrossing* eve
   return TRUE;
 }
 
-gboolean OptionMenuPopup::OnScroll(GtkWidget* widget, GdkEventScroll* event,
-                                    gpointer user_data) {
+gboolean OptionMenuPopup::OnScroll(GtkWidget* widget, GdkEventScroll* event, gpointer user_data) {
   auto* self = static_cast<OptionMenuPopup*>(user_data);
-  
+
   int visible_height = self->height_ - MENU_VERTICAL_PADDING * 2;
   int max_scroll = std::max(0, self->content_height_ - visible_height);
-  
+
   int scroll_step = MENU_ITEM_HEIGHT;
-  
+
   switch (event->direction) {
     case GDK_SCROLL_UP:
       self->scroll_offset_ = std::max(0, self->scroll_offset_ - scroll_step);
@@ -553,7 +552,7 @@ gboolean OptionMenuPopup::OnScroll(GtkWidget* widget, GdkEventScroll* event,
     default:
       break;
   }
-  
+
   // Update hovered item after scroll
   gint x, y;
   GdkWindow* window = gtk_widget_get_window(widget);
@@ -566,31 +565,31 @@ gboolean OptionMenuPopup::OnScroll(GtkWidget* widget, GdkEventScroll* event,
       self->Paint();
     }
   }
-  
+
   return TRUE;
 }
 
-gboolean OptionMenuPopup::OnKeyPress(GtkWidget* widget, GdkEventKey* event,
-                                      gpointer user_data) {
+gboolean OptionMenuPopup::OnKeyPress(GtkWidget* widget, GdkEventKey* event, gpointer user_data) {
   auto* self = static_cast<OptionMenuPopup*>(user_data);
-  
+
   switch (event->keyval) {
     case GDK_KEY_Escape:
       self->Hide();
       return TRUE;
-      
+
     case GDK_KEY_Return:
     case GDK_KEY_KP_Enter:
-      if (self->hovered_index_ >= 0 && self->hovered_index_ < static_cast<int>(self->items_.size())) {
+      if (self->hovered_index_ >= 0 &&
+          self->hovered_index_ < static_cast<int>(self->items_.size())) {
         const auto& item = self->items_[self->hovered_index_];
         if (item.enabled && !item.is_group_label) {
           int selected_index = self->hovered_index_;
-          
+
           auto item_callback = self->item_selected_callback_;
           self->dismissed_callback_ = nullptr;
-          
+
           self->Hide();
-          
+
           if (item_callback) {
             item_callback(selected_index);
           }
@@ -598,12 +597,12 @@ gboolean OptionMenuPopup::OnKeyPress(GtkWidget* widget, GdkEventKey* event,
         }
       }
       break;
-      
+
     case GDK_KEY_Up:
     case GDK_KEY_KP_Up: {
       // Find previous selectable item
-      int new_index = self->hovered_index_ >= 0 ? self->hovered_index_ - 1 : 
-                      static_cast<int>(self->items_.size()) - 1;
+      int new_index = self->hovered_index_ >= 0 ? self->hovered_index_ - 1
+                                                : static_cast<int>(self->items_.size()) - 1;
       while (new_index >= 0) {
         if (self->items_[new_index].enabled && !self->items_[new_index].is_group_label) {
           self->hovered_index_ = new_index;
@@ -615,7 +614,7 @@ gboolean OptionMenuPopup::OnKeyPress(GtkWidget* widget, GdkEventKey* event,
       }
       return TRUE;
     }
-      
+
     case GDK_KEY_Down:
     case GDK_KEY_KP_Down: {
       // Find next selectable item
@@ -631,16 +630,16 @@ gboolean OptionMenuPopup::OnKeyPress(GtkWidget* widget, GdkEventKey* event,
       }
       return TRUE;
     }
-      
+
     default:
       break;
   }
-  
+
   return FALSE;
 }
 
 gboolean OptionMenuPopup::OnParentButtonPress(GtkWidget* widget, GdkEventButton* event,
-                                               gpointer user_data) {
+                                              gpointer user_data) {
   auto* self = static_cast<OptionMenuPopup*>(user_data);
   // Any click on parent window while popup is visible should hide the popup
   if (self->visible_) {

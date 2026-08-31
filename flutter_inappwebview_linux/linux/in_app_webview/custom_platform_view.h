@@ -7,7 +7,11 @@
 #include <string>
 
 #include "in_app_webview.h"
+#include "inappwebview_texture.h"
+#ifndef HAVE_WEBKIT_GTK
+// EGL zero-copy 纹理仅 WPE 后端提供
 #include "inappwebview_egl_texture.h"
+#endif
 
 namespace flutter_inappwebview_plugin {
 
@@ -37,7 +41,9 @@ class CustomPlatformView {
   std::shared_ptr<WebViewType> webview_;
   FlTextureRegistrar* texture_registrar_;
   FlTexture* texture_ = nullptr;
+#ifndef HAVE_WEBKIT_GTK
   InAppWebViewEGLTexture* egl_texture_ = nullptr;  // Pointer to EGL texture if using zero-copy mode
+#endif
   int64_t texture_id_ = -1;
   std::string keepAliveId_;  // Keep-alive ID for preserving WebView across widget disposal
 

@@ -25,16 +25,20 @@
 // Build from source:
 //   See WPE_BACKEND.md or https://wpewebkit.org/about/get-wpe.html
 
+// WebKit WebKitGTK backend note:
+// With HAVE_WEBKIT_GTK, InAppWebView renders via webkit_web_view_snapshot()
+// into the shared triple-buffer pixel pipeline; input is synthesized as GdkEvents.
+// Implementation lives in in_app_webview_gtk.cc.
+
 #include <flutter_linux/flutter_linux.h>
 
-// WPE WebKit core includes (always available)
-#include <wpe/webkit.h>
-#include <jsc/jsc.h>
+// WebKit core includes (WebKitGTK or WPE, selected at build time)
+#include "../webkit_include.h"
 
 // WPEPlatform API (new modern API - default)
 #ifdef HAVE_WPE_PLATFORM
-#include <wpe/wpe-platform.h>
 #include <wpe/headless/wpe-headless.h>
+#include <wpe/wpe-platform.h>
 #endif
 
 // WPEBackend-FDO API (legacy fallback)
@@ -56,15 +60,15 @@
 #include <vector>
 
 #include "../content_blocker/content_blocker_handler.h"
+#include "../find_interaction/find_interaction_controller.h"
 #include "../types/context_menu.h"
 #include "../types/context_menu_popup.h"
-#include "../types/option_menu_popup.h"
 #include "../types/find_session.h"
 #include "../types/hit_test_result.h"
+#include "../types/option_menu_popup.h"
 #include "../types/ssl_certificate.h"
 #include "../types/url_request.h"
 #include "../types/user_script.h"
-#include "../find_interaction/find_interaction_controller.h"
 #include "in_app_webview_settings.h"
 
 // Forward declaration of WPE types in global scope to avoid namespace conflicts
@@ -84,9 +88,9 @@ class WebViewChannelDelegate;
 
 struct InAppWebViewCreationParams {
   int64_t id;
-  PluginInstance* plugin = nullptr;  // Plugin instance for accessing managers
-  GtkWindow* gtkWindow = nullptr;  // Cached GTK window from manager
-  FlView* flView = nullptr;  // Cached FlView for focus restoration
+  PluginInstance* plugin = nullptr;        // Plugin instance for accessing managers
+  GtkWindow* gtkWindow = nullptr;          // Cached GTK window from manager
+  FlView* flView = nullptr;                // Cached FlView for focus restoration
   InAppWebViewManager* manager = nullptr;  // Manager reference for multi-window support
   std::optional<std::shared_ptr<URLRequest>> initialUrlRequest;
   std::optional<std::string> initialFile;
@@ -96,10 +100,15 @@ struct InAppWebViewCreationParams {
   std::optional<std::string> initialDataEncoding;
   std::shared_ptr<InAppWebViewSettings> initialSettings;
   std::optional<std::shared_ptr<ContextMenu>> contextMenu;
-  std::optional<int64_t> windowId;  // For windows created via onCreateWindow
+  std::optional<int64_t> windowId;          // For windows created via onCreateWindow
   WebKitWebView* relatedWebView = nullptr;  // For creating related WebViews (shares web process)
   std::vector<std::shared_ptr<UserScript>> initialUserScripts;  // User scripts to inject
   WebKitWebContext* webContext = nullptr;  // Custom WebKitWebContext from WebViewEnvironment
+#ifdef HAVE_WEBKIT_GTK
+  // True when the widget is hosted inside a browser's GTK window (InAppBrowser):
+  // skips the offscreen host and lets the browser own the widget hierarchy.
+  bool hostInBrowserWindow = false;
+#endif
 };
 
 // Pointer event kind (matches Dart side)
@@ -137,10 +146,11 @@ class InAppWebView {
 
   // Attach/recreate the Dart method channel using the given [channel_id].
   void AttachChannel(FlBinaryMessenger* messenger, int64_t channel_id);
-  
+
   // Attach/recreate the Dart method channel using a string-based channel ID.
   // This is used for HeadlessInAppWebView where the ID is a long string from Dart.
-  void AttachChannel(FlBinaryMessenger* messenger, const std::string& channel_id, const bool is_full_channel_name);
+  void AttachChannel(FlBinaryMessenger* messenger, const std::string& channel_id,
+                     const bool is_full_channel_name);
 
   int64_t channel_id() const { return channel_id_; }
   const std::string& string_channel_id() const { return string_channel_id_; }
@@ -180,15 +190,12 @@ class InAppWebView {
   HitTestResult getHitTestResult() const;
 
   // JavaScript execution
-  void evaluateJavascript(const std::string& source,
-                          const std::optional<std::string>& worldName,
+  void evaluateJavascript(const std::string& source, const std::optional<std::string>& worldName,
                           std::function<void(const std::optional<std::string>&)> callback);
-  void callAsyncJavaScript(
-      const std::string& functionBody,
-      const std::string& argumentsJson,
-      const std::vector<std::string>& argumentKeys,
-      const std::optional<std::string>& worldName,
-      std::function<void(const std::string&)> callback);
+  void callAsyncJavaScript(const std::string& functionBody, const std::string& argumentsJson,
+                           const std::vector<std::string>& argumentKeys,
+                           const std::optional<std::string>& worldName,
+                           std::function<void(const std::string&)> callback);
   void injectJavascriptFileFromUrl(const std::string& urlFile);
   void injectCSSCode(const std::string& source);
   void injectCSSFileFromUrl(const std::string& urlFile);
@@ -201,11 +208,12 @@ class InAppWebView {
 
   // Web Message Listener
   void addWebMessageListener(const std::string& jsObjectName,
-                              const std::vector<std::string>& allowedOriginRules);
+                             const std::vector<std::string>& allowedOriginRules);
 
   // Web Message Channel
   void createWebMessageChannel(std::function<void(const std::optional<std::string>&)> callback);
-  void postWebMessage(const std::string& messageData, const std::string& targetOrigin, int64_t messageType);
+  void postWebMessage(const std::string& messageData, const std::string& targetOrigin,
+                      int64_t messageType);
   void setWebMessageCallback(const std::string& channelId, int portIndex);
   void postWebMessageOnPort(const std::string& channelId, int portIndex,
                             const std::string& messageData, int64_t messageType);
@@ -240,7 +248,9 @@ class InAppWebView {
   void getContentWidth(std::function<void(int64_t)> callback);
 
   // Find interaction controller (now managed separately)
-  FindInteractionController* findInteractionController() const { return findInteractionController_.get(); }
+  FindInteractionController* findInteractionController() const {
+    return findInteractionController_.get();
+  }
 
   // Settings
   std::shared_ptr<InAppWebViewSettings> settings() const { return settings_; }
@@ -340,8 +350,7 @@ class InAppWebView {
   // Show the native color picker popup with optional predefined colors and alpha support
   void ShowColorPicker(const std::string& initialColor, int x, int y,
                        const std::vector<std::string>& predefinedColors = {},
-                       bool alphaEnabled = false,
-                       const std::string& colorSpace = "limited-srgb");
+                       bool alphaEnabled = false, const std::string& colorSpace = "limited-srgb");
   // Hide and cleanup any visible color picker
   void HideColorPicker();
   // Hide and cleanup any visible file chooser dialog
@@ -352,21 +361,23 @@ class InAppWebView {
   // Date picker methods (for <input type="date/time"> support in WPE)
   // Show the native date/time picker dialog
   void ShowDatePicker(const std::string& inputType, const std::string& value,
-                      const std::string& min, const std::string& max,
-                      const std::string& step, int x, int y);
+                      const std::string& min, const std::string& max, const std::string& step,
+                      int x, int y);
   // Hide and cleanup any visible date picker
   void HideDatePicker();
 
   // Resolve an internal handler's Promise with a JSON result via WebKitScriptMessageReply
   // Used by color/date picker dialogs to send the result back to JavaScript (works for iframes)
-  void ResolveInternalHandlerWithReply(WebKitScriptMessageReply* reply, const std::string& jsonResult);
+  void ResolveInternalHandlerWithReply(WebKitScriptMessageReply* reply,
+                                       const std::string& jsonResult);
 
   // JavaScript bridge handler using with_reply API (enables iframe support)
   // Returns true if handled, false otherwise
   bool handleScriptMessageWithReply(const std::string& body, WebKitScriptMessageReply* reply);
-  
+
   // Reject an internal handler's Promise with an error message via WebKitScriptMessageReply
-  void RejectInternalHandlerWithReply(WebKitScriptMessageReply* reply, const std::string& errorMessage);
+  void RejectInternalHandlerWithReply(WebKitScriptMessageReply* reply,
+                                      const std::string& errorMessage);
 
   // Hide all custom popups (context menu, color picker, file chooser, option menu, etc.)
   // Use this when the webview state changes (resize, scroll, load, focus loss, etc.)
@@ -420,6 +431,8 @@ class InAppWebView {
   void createLink(const std::string& linkUri);
 
   // Check if WPE WebKit is available on the system
+  // (With the WebKitGTK backend this always returns true; the name is kept
+  //  for channel-protocol compatibility.)
   static bool IsWpeWebKitAvailable();
 
 #ifdef HAVE_WPE_PLATFORM
@@ -451,8 +464,8 @@ class InAppWebView {
   PluginInstance* plugin_ = nullptr;  // Plugin instance for accessing managers
   FlPluginRegistrar* registrar_ = nullptr;
   FlBinaryMessenger* messenger_ = nullptr;  // Cached messenger from constructor
-  GtkWindow* gtk_window_ = nullptr;  // Cached GTK window for context menu display
-  FlView* fl_view_ = nullptr;  // Cached FlView for focus restoration
+  GtkWindow* gtk_window_ = nullptr;         // Cached GTK window for context menu display
+  FlView* fl_view_ = nullptr;               // Cached FlView for focus restoration
   InAppWebViewManager* manager_ = nullptr;  // Manager reference for multi-window support
   int64_t id_ = 0;
   int64_t channel_id_ = -1;
@@ -469,18 +482,18 @@ class InAppWebView {
 
 #ifdef HAVE_WPE_PLATFORM
   // === WPEPlatform API members (modern) ===
-  WPEDisplay* wpe_display_ = nullptr;     // Owned headless display
-  WPEView* wpe_view_ = nullptr;           // From webkit_web_view_get_wpe_view, not owned
-  WPEToplevel* wpe_toplevel_ = nullptr;   // From wpe_view_get_toplevel, not owned
-  
+  WPEDisplay* wpe_display_ = nullptr;    // Owned headless display
+  WPEView* wpe_view_ = nullptr;          // From webkit_web_view_get_wpe_view, not owned
+  WPEToplevel* wpe_toplevel_ = nullptr;  // From wpe_view_get_toplevel, not owned
+
   // Buffer rendering for WPEPlatform
-  WPEBuffer* current_buffer_ = nullptr;   // Current frame buffer (borrowed, not owned)
-  void* current_egl_image_ = nullptr;     // EGL image created from current buffer
-  uint32_t current_buffer_width_ = 0;     // Width of current buffer
-  uint32_t current_buffer_height_ = 0;    // Height of current buffer
-  gulong buffer_rendered_handler_ = 0;    // Signal handler ID for buffer-rendered
-  gulong scale_changed_handler_ = 0;      // Signal handler ID for notify::scale-factor
-  mutable std::mutex wpe_buffer_mutex_;   // Mutex for thread-safe buffer access
+  WPEBuffer* current_buffer_ = nullptr;  // Current frame buffer (borrowed, not owned)
+  void* current_egl_image_ = nullptr;    // EGL image created from current buffer
+  uint32_t current_buffer_width_ = 0;    // Width of current buffer
+  uint32_t current_buffer_height_ = 0;   // Height of current buffer
+  gulong buffer_rendered_handler_ = 0;   // Signal handler ID for buffer-rendered
+  gulong scale_changed_handler_ = 0;     // Signal handler ID for notify::scale-factor
+  mutable std::mutex wpe_buffer_mutex_;  // Mutex for thread-safe buffer access
 #endif
 
 #ifdef HAVE_WPE_BACKEND_LEGACY
@@ -490,13 +503,13 @@ class InAppWebView {
 
   // WPE FDO exportable (for DMA-BUF buffer export)
   struct wpe_view_backend_exportable_fdo* exportable_ = nullptr;
-  
+
   // Current EGL image from WPE (for zero-copy GPU texture sharing).
   ::wpe_fdo_egl_exported_image* exported_image_ = nullptr;
-  
+
   // Mutex for protecting exported_image_ access from multiple threads
   mutable std::mutex exported_image_mutex_;
-  
+
   // Flag to indicate the WebProcess has crashed and EGL resources are invalid
   // This prevents using stale EGL images after a crash
   std::atomic<bool> web_process_crashed_{false};
@@ -507,6 +520,23 @@ class InAppWebView {
   void* egl_context_ = nullptr;        // EGLContext for readback
   unsigned int fbo_ = 0;               // Framebuffer object for EGL image binding
   unsigned int readback_texture_ = 0;  // Texture for EGL image
+
+#ifdef HAVE_WEBKIT_GTK
+  // === WebKitGTK backend members ===
+  // Offscreen host window: holds the WebKitWebView widget hierarchy without
+  // mapping a visible toplevel. Required so the widget can realize/render
+  // while the visible output goes through the texture pipeline.
+  GtkWindow* gtk_host_window_ = nullptr;
+
+  // Snapshot scheduling state (GTK main thread only)
+  bool snapshot_pending_ = false;  // true while an async snapshot is in flight
+  bool snapshot_dirty_ = true;     // set when content changed and a snapshot is needed
+
+  // GTK signal handlers
+  gulong gtk_scale_handler_id_ = 0;         // notify::scale-factor on the webview widget
+  gulong gtk_window_scale_handler_id_ = 0;  // notify::scale-factor on the gtk window
+  guint snapshot_ticker_source_ = 0;        // g_timeout source id for frame pacing
+#endif
 
   // Triple buffering for pixel data (fallback when DMA-BUF not available)
   static constexpr size_t kNumBuffers = 3;
@@ -519,7 +549,7 @@ class InAppWebView {
   std::atomic<size_t> write_buffer_index_{0};
   std::atomic<size_t> read_buffer_index_{1};
   mutable std::mutex buffer_swap_mutex_;
-  
+
   // Flag to skip pixel readback when using zero-copy EGL texture mode
   // When true, OnExportDmaBuf won't call ReadPixelsFromEglImage
   bool skip_pixel_readback_ = false;
@@ -616,8 +646,8 @@ class InAppWebView {
   double last_progress_ = 0.0;
 
   // Media capture state tracking (for onCameraCaptureStateChanged/onMicrophoneCaptureStateChanged)
-  int last_camera_capture_state_ = 0;       // WebKitMediaCaptureState: NONE=0, ACTIVE=1, MUTED=2
-  int last_microphone_capture_state_ = 0;   // WebKitMediaCaptureState: NONE=0, ACTIVE=1, MUTED=2
+  int last_camera_capture_state_ = 0;      // WebKitMediaCaptureState: NONE=0, ACTIVE=1, MUTED=2
+  int last_microphone_capture_state_ = 0;  // WebKitMediaCaptureState: NONE=0, ACTIVE=1, MUTED=2
 
   // Fullscreen state (for DOM fullscreen requests)
   bool is_fullscreen_ = false;
@@ -662,6 +692,37 @@ class InAppWebView {
   void CleanupMonitorChangeHandlers();
   void UpdateMonitorRefreshRate();
 
+#ifdef HAVE_WEBKIT_GTK
+  // === WebKitGTK backend methods (implemented in in_app_webview_gtk.cc) ===
+  // Creates the offscreen host window, mounts the widget and realizes it.
+  void InitGtkHost();
+  // Destroys the offscreen host window (must run before webview_ is unref'ed).
+  void ShutdownGtkHost();
+  // Requests an async visible-region snapshot (no-op if one is already in flight).
+  void RequestSnapshot();
+  // Async callback for webkit_web_view_snapshot().
+  static void OnSnapshotReady(GObject* source_object, GAsyncResult* result, gpointer user_data);
+  // Converts the snapshot surface to BGRA, writes it into the triple-buffer
+  // pixel pipeline and notifies Flutter via on_frame_available_.
+  void DeliverSnapshot(cairo_surface_t* surface);
+  // Synthesizes a GdkEvent targeted at the webview widget and dispatches it.
+  void DispatchGdkEvent(GdkEvent* event);
+
+  // Frame pacing ticker (WebKitGTK has no per-frame callback; the ticker
+  // drives RequestSnapshot while snapshot_pending_ prevents queue buildup)
+  void StartSnapshotTicker();
+  void StopSnapshotTicker();
+  static gboolean OnSnapshotTick(gpointer user_data);
+
+  // === Input synthesis (implemented in in_app_webview_gtk.cc) ===
+  void GtkSetCursorPos(double x, double y);
+  void GtkSetPointerButton(int kind, int button, int clickCount);
+  void GtkSetScrollDelta(double dx, double dy);
+  void GtkSendKeyEvent(int type, int64_t keyCode, int scanCode, uint32_t modifiers);
+  void GtkSendTouchEvent(int type, int id, double x, double y,
+                         const std::vector<std::tuple<int, double, double, int>>& touchPoints);
+#endif
+
  public:
 #ifdef HAVE_WPE_BACKEND_LEGACY
   // === WPE FDO backend callbacks (legacy API only) ===
@@ -678,13 +739,13 @@ class InAppWebView {
 
   // DOM fullscreen request handler (called from WPE backend)
   bool OnDomFullscreenRequest(bool fullscreen);
-  
+
   // Color picker state (for <input type="color"> support in WPE)
   // Public because accessed from C-style GTK callback
-  std::string pending_color_input_value_;  // Current color from the input
+  std::string pending_color_input_value_;     // Current color from the input
   GtkWidget* active_color_dialog_ = nullptr;  // Active color picker dialog (non-blocking)
   bool active_color_alpha_enabled_ = false;   // Alpha enabled for active dialog
-  int64_t color_dialog_show_time_ = 0;         // Time when dialog was shown (to prevent immediate close)
+  int64_t color_dialog_show_time_ = 0;  // Time when dialog was shown (to prevent immediate close)
   WebKitScriptMessageReply* pending_color_reply_ = nullptr;  // WebKit reply for Promise resolution
 
   // Date picker state (for <input type="date/time/etc.> support in WPE)
@@ -699,12 +760,13 @@ class InAppWebView {
 
   // File chooser state (for <input type="file"> support)
   // Public because accessed from C-style GTK callback
-  GtkWidget* active_file_dialog_ = nullptr;   // Active file chooser dialog (non-blocking)
-  int64_t file_dialog_show_time_ = 0;          // Time when dialog was shown (to prevent immediate close)
-  void* file_chooser_context_ = nullptr;       // Opaque pointer to FileChooserContext (for cleanup)
+  GtkWidget* active_file_dialog_ = nullptr;  // Active file chooser dialog (non-blocking)
+  int64_t file_dialog_show_time_ = 0;     // Time when dialog was shown (to prevent immediate close)
+  void* file_chooser_context_ = nullptr;  // Opaque pointer to FileChooserContext (for cleanup)
 
   // Option menu state (for HTML <select> support)
-  WebKitOptionMenu* webkit_option_menu_ = nullptr;  // WebKit's option menu object (kept alive during popup)
+  WebKitOptionMenu* webkit_option_menu_ =
+      nullptr;  // WebKit's option menu object (kept alive during popup)
 
   // Pointer lock handler (called from WPE backend)
   bool OnPointerLockRequest(bool lock);
@@ -763,32 +825,27 @@ class InAppWebView {
                                    guint modifiers, gpointer user_data);
 
   static void OnWebProcessTerminated(WebKitWebView* web_view,
-                                     WebKitWebProcessTerminationReason reason,
-                                     gpointer user_data);
+                                     WebKitWebProcessTerminationReason reason, gpointer user_data);
 
-  static gboolean OnRunFileChooser(WebKitWebView* web_view,
-                                   WebKitFileChooserRequest* request,
+  static gboolean OnRunFileChooser(WebKitWebView* web_view, WebKitFileChooserRequest* request,
                                    gpointer user_data);
 
-  static gboolean OnShowOptionMenu(WebKitWebView* web_view,
-                                   WebKitOptionMenu* menu,
-                                   WebKitRectangle* rectangle,
-                                   gpointer user_data);
+  static gboolean OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu,
+                                   WebKitRectangle* rectangle, gpointer user_data);
 
   // === Download Signals ===
-  static void OnDownloadStarted(WebKitNetworkSession* network_session,
-                                WebKitDownload* download,
+  static void OnDownloadStarted(WebKitNetworkSession* network_session, WebKitDownload* download,
                                 gpointer user_data);
 
   // === Navigation State Signals ===
   static void OnBackForwardListChanged(WebKitBackForwardList* list,
                                        WebKitBackForwardListItem* item_added,
-                                       gpointer items_removed,
-                                       gpointer user_data);
+                                       gpointer items_removed, gpointer user_data);
 
   // === Media Capture State Signals ===
   static void OnNotifyCameraCaptureState(GObject* object, GParamSpec* pspec, gpointer user_data);
-  static void OnNotifyMicrophoneCaptureState(GObject* object, GParamSpec* pspec, gpointer user_data);
+  static void OnNotifyMicrophoneCaptureState(GObject* object, GParamSpec* pspec,
+                                             gpointer user_data);
 
   // === Input helpers ===
   void SendWpePointerEvent(uint32_t type, double x, double y, uint32_t button);

@@ -2,7 +2,6 @@
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_IN_APP_WEBVIEW_MANAGER_H_
 
 #include <flutter_linux/flutter_linux.h>
-#include <wpe/webkit.h>
 
 #include <cstdint>
 #include <map>
@@ -11,6 +10,7 @@
 
 #include "../types/url_request.h"
 #include "../types/web_view_transport.h"
+#include "../webkit_include.h"
 #include "custom_platform_view.h"
 #include "in_app_webview.h"
 #include "in_app_webview_settings.h"
@@ -40,7 +40,8 @@ class InAppWebViewManager {
 
   // Keep-alive management
   // Store a WebView for later reuse when widget is disposed but keepAliveId is set
-  void StoreKeepAliveWebView(const std::string& keepAliveId, std::unique_ptr<CustomPlatformView> view);
+  void StoreKeepAliveWebView(const std::string& keepAliveId,
+                             std::unique_ptr<CustomPlatformView> view);
   // Get a keep-alive WebView by its ID (returns nullptr if not found)
   CustomPlatformView* GetKeepAliveWebView(const std::string& keepAliveId) const;
   // Take ownership of a keep-alive WebView (removes from map and returns)
@@ -52,7 +53,7 @@ class InAppWebViewManager {
   PluginInstance* plugin_ = nullptr;
   FlPluginRegistrar* registrar_ = nullptr;
   GtkWindow* gtk_window_ = nullptr;  // Cached during plugin registration
-  FlView* fl_view_ = nullptr;  // Cached FlView for focus restoration
+  FlView* fl_view_ = nullptr;        // Cached FlView for focus restoration
   FlMethodChannel* method_channel_ = nullptr;
   FlTextureRegistrar* texture_registrar_ = nullptr;
   FlBinaryMessenger* messenger_ = nullptr;
@@ -67,8 +68,8 @@ class InAppWebViewManager {
   // Map of window id to WebViewTransport for popup windows
   // Used to track WebViews created via onCreateWindow
   std::map<int64_t, std::unique_ptr<WebViewTransport>> windowWebViews_;
-  
-  // Auto-incrementing ID for window webviews  
+
+  // Auto-incrementing ID for window webviews
   int64_t windowAutoincrementId_ = 0;
 
   // Auto-incrementing ID for webviews

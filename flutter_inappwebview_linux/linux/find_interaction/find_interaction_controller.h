@@ -2,13 +2,13 @@
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_FIND_INTERACTION_CONTROLLER_H_
 
 #include <flutter_linux/flutter_linux.h>
-#include <wpe/webkit.h>
 
 #include <memory>
 #include <optional>
 #include <string>
 
 #include "../types/find_session.h"
+#include "../webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 
@@ -36,12 +36,11 @@ class FindInteractionController {
   void dispose();
 
   // Signal handlers
-  static void OnCountedMatches(WebKitFindController* find_controller,
-                               guint match_count, gpointer user_data);
-  static void OnFoundText(WebKitFindController* find_controller,
-                          guint match_count, gpointer user_data);
-  static void OnFailedToFindText(WebKitFindController* find_controller,
-                                 gpointer user_data);
+  static void OnCountedMatches(WebKitFindController* find_controller, guint match_count,
+                               gpointer user_data);
+  static void OnFoundText(WebKitFindController* find_controller, guint match_count,
+                          gpointer user_data);
+  static void OnFailedToFindText(WebKitFindController* find_controller, gpointer user_data);
 
   InAppWebView* webView_;
   std::unique_ptr<FindInteractionChannelDelegate> channelDelegate_;

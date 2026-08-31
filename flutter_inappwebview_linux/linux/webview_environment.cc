@@ -1,13 +1,12 @@
 #include "webview_environment.h"
 
-#include <wpe/webkit.h>
-
 #include <cstring>
 #include <sstream>
 
 #include "plugin_instance.h"
 #include "utils/flutter.h"
 #include "utils/log.h"
+#include "webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 
@@ -23,11 +22,9 @@ bool string_equals(const gchar* a, const char* b) {
 // ============================================================================
 
 WebViewEnvironmentInstanceChannelDelegate::WebViewEnvironmentInstanceChannelDelegate(
-    FlBinaryMessenger* messenger,
-    const std::string& id,
+    FlBinaryMessenger* messenger, const std::string& id,
     std::function<void(const std::string&)> disposeCallback)
-    : ChannelDelegate(messenger,
-                      "com.pichillilorenzo/flutter_webview_environment_" + id),
+    : ChannelDelegate(messenger, "com.pichillilorenzo/flutter_webview_environment_" + id),
       id_(id),
       disposeCallback_(std::move(disposeCallback)) {}
 
@@ -74,7 +71,8 @@ bool WebViewEnvironmentInstanceChannelDelegate::isSpellCheckingEnabled() const {
   return webkit_web_context_get_spell_checking_enabled(context_);
 }
 
-std::vector<std::string> WebViewEnvironmentInstanceChannelDelegate::getSpellCheckingLanguages() const {
+std::vector<std::string> WebViewEnvironmentInstanceChannelDelegate::getSpellCheckingLanguages()
+    const {
   std::vector<std::string> result;
   if (context_ == nullptr) {
     return result;
@@ -90,7 +88,7 @@ std::vector<std::string> WebViewEnvironmentInstanceChannelDelegate::getSpellChec
 
 int WebViewEnvironmentInstanceChannelDelegate::getCacheModel() const {
   if (context_ == nullptr) {
-    return 1; // Default: WEBKIT_CACHE_MODEL_WEB_BROWSER
+    return 1;  // Default: WEBKIT_CACHE_MODEL_WEB_BROWSER
   }
   return static_cast<int>(webkit_web_context_get_cache_model(context_));
 }
@@ -168,13 +166,12 @@ void WebViewEnvironment::create(const std::string& id, FlValue* settings) {
   // Check if we need to use a specific timezone override
   // This must be set at construction time via the time-zone-override property
   auto timeZoneOverride = get_optional_fl_map_value<std::string>(settings, "timeZoneOverride");
-  
+
   WebKitWebContext* context = nullptr;
   if (timeZoneOverride.has_value() && !timeZoneOverride->empty()) {
     // Create WebContext with timezone override property
-    context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT,
-        "time-zone-override", timeZoneOverride->c_str(),
-        nullptr));
+    context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "time-zone-override",
+                                              timeZoneOverride->c_str(), nullptr));
   } else {
     // Create a default WebKitWebContext
     context = webkit_web_context_new();
@@ -190,8 +187,8 @@ void WebViewEnvironment::create(const std::string& id, FlValue* settings) {
     // cacheModel
     auto cacheModel = get_optional_fl_map_value<int64_t>(settings, "cacheModel");
     if (cacheModel.has_value()) {
-      webkit_web_context_set_cache_model(context, 
-          static_cast<WebKitCacheModel>(cacheModel.value()));
+      webkit_web_context_set_cache_model(context,
+                                         static_cast<WebKitCacheModel>(cacheModel.value()));
     }
 
     // spellCheckingEnabled
@@ -201,21 +198,21 @@ void WebViewEnvironment::create(const std::string& id, FlValue* settings) {
     }
 
     // spellCheckingLanguages
-    auto spellCheckingLanguages = get_optional_fl_map_value<std::vector<std::string>>(
-        settings, "spellCheckingLanguages");
+    auto spellCheckingLanguages =
+        get_optional_fl_map_value<std::vector<std::string>>(settings, "spellCheckingLanguages");
     if (spellCheckingLanguages.has_value() && !spellCheckingLanguages->empty()) {
       // Convert to null-terminated array of C strings
       std::vector<const gchar*> langs;
       for (const auto& lang : *spellCheckingLanguages) {
         langs.push_back(lang.c_str());
       }
-      langs.push_back(nullptr); // Null terminate
+      langs.push_back(nullptr);  // Null terminate
       webkit_web_context_set_spell_checking_languages(context, langs.data());
     }
 
     // preferredLanguages
-    auto preferredLanguages = get_optional_fl_map_value<std::vector<std::string>>(
-        settings, "preferredLanguages");
+    auto preferredLanguages =
+        get_optional_fl_map_value<std::vector<std::string>>(settings, "preferredLanguages");
     if (preferredLanguages.has_value() && !preferredLanguages->empty()) {
       std::vector<const gchar*> langs;
       for (const auto& lang : *preferredLanguages) {
@@ -232,15 +229,15 @@ void WebViewEnvironment::create(const std::string& id, FlValue* settings) {
     }
 
     // webProcessExtensionsDirectory
-    auto extensionsDir = get_optional_fl_map_value<std::string>(
-        settings, "webProcessExtensionsDirectory");
+    auto extensionsDir =
+        get_optional_fl_map_value<std::string>(settings, "webProcessExtensionsDirectory");
     if (extensionsDir.has_value() && !extensionsDir->empty()) {
       webkit_web_context_set_web_process_extensions_directory(context, extensionsDir->c_str());
     }
 
     // sandboxPaths
-    auto sandboxPaths = get_optional_fl_map_value<std::vector<std::string>>(
-        settings, "sandboxPaths");
+    auto sandboxPaths =
+        get_optional_fl_map_value<std::vector<std::string>>(settings, "sandboxPaths");
     if (sandboxPaths.has_value()) {
       for (const auto& path : *sandboxPaths) {
         if (!path.empty()) {
@@ -252,8 +249,7 @@ void WebViewEnvironment::create(const std::string& id, FlValue* settings) {
 
   // Create instance channel delegate
   auto instanceDelegate = std::make_unique<WebViewEnvironmentInstanceChannelDelegate>(
-      messenger_, id,
-      [this](const std::string& envId) { disposeEnvironment(envId); });
+      messenger_, id, [this](const std::string& envId) { disposeEnvironment(envId); });
   instanceDelegate->setContext(context);
 
   // Store in map
@@ -270,7 +266,8 @@ void WebViewEnvironment::disposeEnvironment(const std::string& id) {
   }
 }
 
-WebViewEnvironmentInstanceChannelDelegate* WebViewEnvironment::getInstance(const std::string& id) const {
+WebViewEnvironmentInstanceChannelDelegate* WebViewEnvironment::getInstance(
+    const std::string& id) const {
   auto it = instances_.find(id);
   if (it != instances_.end()) {
     return it->second.get();

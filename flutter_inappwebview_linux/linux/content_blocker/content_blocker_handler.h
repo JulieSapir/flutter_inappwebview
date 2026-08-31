@@ -2,11 +2,12 @@
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_CONTENT_BLOCKER_HANDLER_H_
 
 #include <flutter_linux/flutter_linux.h>
-#include <wpe/webkit.h>
 
 #include <functional>
 #include <memory>
 #include <string>
+
+#include "../webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 
@@ -47,8 +48,7 @@ class ContentBlockerHandler {
    * @param contentBlockers FlValue list of content blocker maps
    * @param callback Called when compilation is complete (success or failure)
    */
-  void setContentBlockers(FlValue* contentBlockers,
-                          std::function<void(bool success)> callback);
+  void setContentBlockers(FlValue* contentBlockers, std::function<void(bool success)> callback);
 
   /**
    * Remove all content filters from the content manager.
@@ -83,7 +83,7 @@ class ContentBlockerHandler {
    */
   static void onFilterCompiled(GObject* source, GAsyncResult* result, gpointer user_data);
 
-  WebKitUserContentManager* content_manager_;  // Not owned (from webview)
+  WebKitUserContentManager* content_manager_;   // Not owned (from webview)
   WebKitUserContentFilterStore* filter_store_;  // Owned
   std::string filter_identifier_;
   std::string store_path_;

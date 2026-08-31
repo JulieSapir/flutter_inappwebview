@@ -6,7 +6,7 @@
 // Manages user scripts and plugin scripts for a WebKitWebView.
 // This is analogous to WKUserContentController in WKWebView.
 
-#include <wpe/webkit.h>
+#include <jsc/jsc.h>  // jsc 头路径 WPE/GTK 一致
 
 #include <functional>
 #include <map>
@@ -16,20 +16,21 @@
 
 #include "../types/plugin_script.h"
 #include "../types/user_script.h"
-
-#include <jsc/jsc.h>
+#include "../webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 
 // Script message handler callback type
 // Third parameter is the JSCContext* of the frame that sent the message (for iframe support)
-using ScriptMessageHandler = std::function<void(const std::string&, const std::string&, JSCContext*)>;
+using ScriptMessageHandler =
+    std::function<void(const std::string&, const std::string&, JSCContext*)>;
 
 // Script message handler with reply callback type
 // Receives the message body (JSON string) and a WebKitScriptMessageReply* for async reply
 // The reply object must be ref'd if the callback wants to respond asynchronously
 // Returns true if the message was handled and reply is pending (async), false for sync handling
-using ScriptMessageWithReplyHandler = std::function<bool(const std::string&, WebKitScriptMessageReply*)>;
+using ScriptMessageWithReplyHandler =
+    std::function<bool(const std::string&, WebKitScriptMessageReply*)>;
 
 class UserContentController {
  public:
@@ -48,10 +49,11 @@ class UserContentController {
   // Script message handler (standard - no reply capability)
   void setScriptMessageHandler(ScriptMessageHandler handler);
   void registerScriptMessageHandler(const std::string& name);
-  
+
   // Script message handler with reply (for async responses to JavaScript)
   // Used by color/date pickers to respond to the exact frame that sent the message
-  void setScriptMessageWithReplyHandler(const std::string& name, ScriptMessageWithReplyHandler handler);
+  void setScriptMessageWithReplyHandler(const std::string& name,
+                                        ScriptMessageWithReplyHandler handler);
   void registerScriptMessageHandlerWithReply(const std::string& name);
 
   // Get all user scripts
@@ -80,11 +82,10 @@ class UserContentController {
   // Static callback for script message received signal
   static void onScriptMessageReceived(WebKitUserContentManager* manager, JSCValue* value,
                                       gpointer user_data);
-  
+
   // Static callback for script message with reply received signal
   static gboolean onScriptMessageWithReplyReceived(WebKitUserContentManager* manager,
-                                                   JSCValue* value,
-                                                   WebKitScriptMessageReply* reply,
+                                                   JSCValue* value, WebKitScriptMessageReply* reply,
                                                    gpointer user_data);
 };
 

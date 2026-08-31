@@ -2,11 +2,12 @@
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_IN_APP_WEBVIEW_SETTINGS_H_
 
 #include <flutter_linux/flutter_linux.h>
-#include <wpe/webkit.h>
 
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "../webkit_include.h"
 
 namespace flutter_inappwebview_plugin {
 
@@ -91,16 +92,16 @@ class InAppWebViewSettings {
   int minimumLogicalFontSize = 0;
 
   // === Security settings ===
-  bool allowFileAccessFromFileURLs = false;  // Security: default false
+  bool allowFileAccessFromFileURLs = false;       // Security: default false
   bool allowUniversalAccessFromFileURLs = false;  // Security: default false
-  bool disableWebSecurity = false;  // Security: default false
-  bool allowTopNavigationToDataUrls = false;  // Security: default false
+  bool disableWebSecurity = false;                // Security: default false
+  bool allowTopNavigationToDataUrls = false;      // Security: default false
 
   // === Clipboard settings ===
   bool javaScriptCanAccessClipboard = false;  // Security: default false
 
   // === WebRTC settings ===
-  bool enableWebRTC = true;  // Enable by default for video chat apps
+  bool enableWebRTC = true;         // Enable by default for video chat apps
   std::string webRTCUdpPortsRange;  // Format: "minPort:maxPort"
 
   // === Media settings ===
@@ -108,7 +109,7 @@ class InAppWebViewSettings {
   bool enableMedia = true;
   bool enableEncryptedMedia = false;  // DRM - requires setup
   bool enableMediaCapabilities = true;
-  bool enableMockCaptureDevices = false;  // Testing only
+  bool enableMockCaptureDevices = false;                  // Testing only
   std::string mediaContentTypesRequiringHardwareSupport;  // Semicolon-separated MIME types
 
   // === Other settings ===
@@ -118,18 +119,18 @@ class InAppWebViewSettings {
 
   // === WPE Platform settings ===
   // These settings use the WPE Platform API (available when HAVE_WPE_PLATFORM is defined)
-  std::optional<bool> darkMode;              // Dark mode for websites (prefers-color-scheme)
-  std::optional<bool> disableAnimations;     // Reduce motion for accessibility
-  std::optional<bool> fontAntialias;         // Font antialiasing
-  std::optional<int> fontHintingStyle;       // Font hinting (0=none, 1=slight, 2=medium, 3=full)
-  std::optional<int> fontSubpixelLayout;     // Subpixel layout (0=RGB, 1=BGR, 2=VRGB, 3=VBGR)
-  std::optional<double> fontDPI;             // Font DPI (default 96.0)
-  std::optional<int> cursorBlinkTime;        // Cursor blink time in ms
-  std::optional<int> doubleClickDistance;    // Double-click threshold in px
-  std::optional<int> doubleClickTime;        // Double-click timeout in ms
-  std::optional<int> dragThreshold;          // Drag gesture threshold in px
-  std::optional<int> keyRepeatDelay;         // Key repeat delay in ms
-  std::optional<int> keyRepeatInterval;      // Key repeat interval in ms
+  std::optional<bool> darkMode;            // Dark mode for websites (prefers-color-scheme)
+  std::optional<bool> disableAnimations;   // Reduce motion for accessibility
+  std::optional<bool> fontAntialias;       // Font antialiasing
+  std::optional<int> fontHintingStyle;     // Font hinting (0=none, 1=slight, 2=medium, 3=full)
+  std::optional<int> fontSubpixelLayout;   // Subpixel layout (0=RGB, 1=BGR, 2=VRGB, 3=VBGR)
+  std::optional<double> fontDPI;           // Font DPI (default 96.0)
+  std::optional<int> cursorBlinkTime;      // Cursor blink time in ms
+  std::optional<int> doubleClickDistance;  // Double-click threshold in px
+  std::optional<int> doubleClickTime;      // Double-click timeout in ms
+  std::optional<int> dragThreshold;        // Drag gesture threshold in px
+  std::optional<int> keyRepeatDelay;       // Key repeat delay in ms
+  std::optional<int> keyRepeatInterval;    // Key repeat interval in ms
 
   // === Scroll settings ===
   int64_t scrollMultiplier = 1;

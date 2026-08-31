@@ -2,13 +2,13 @@
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_CREATE_WINDOW_ACTION_H_
 
 #include <flutter_linux/flutter_linux.h>
-#include <wpe/webkit.h>
 
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 
+#include "../webkit_include.h"
 #include "url_request.h"
 
 namespace flutter_inappwebview_plugin {

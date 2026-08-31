@@ -34,3 +34,4 @@ tool/chromedriver
 tool/chromedriver.*
 
 plans/
+.github/copilot-instructions.md
