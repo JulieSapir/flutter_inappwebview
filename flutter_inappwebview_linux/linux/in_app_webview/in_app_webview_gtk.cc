@@ -1,30 +1,31 @@
 // in_app_webview_gtk.cc - WebKitGTK 后端（backend=gtk，默认）专属实现
 //
-// 渲染管线：
-//   webkit_web_view_snapshot()（异步，GTK 主线程回调）
+// 渲染管线（二选一，能力检查决定）：
+//
+// 1. GPU 直通（默认，X11 + Composite/Damage + EGL_KHR_image_pixmap）：
+//   WebKit 合成 → webview 原生 X 窗口（GPU）→ XComposite redirect pixmap
+//   → EGLImage 导入 → FlTextureGL 纹理 → Flutter 采样。零 CPU 像素搬运。
+//   宿主为 override-redirect 的 GTK_WINDOW_POPUP（屏外定位），帧驱动为
+//   XDamage 事件（独立 X 连接）。实现在 webkit_gpu_capture.cc。
+//
+// 2. snapshot 回退（Wayland / 缺扩展 / FLUTTER_INAPPWEBVIEW_LINUX_GPU_CAPTURE=0）：
+//   webkit_web_view_get_snapshot()（异步，GTK 主线程回调）
 //   → cairo ARGB32 surface（小端机内存布局为 BGRA）
 //   → ConvertARGB32ToRGBA()（SIMD BGRA→RGBA，复用 simd_convert.h）
 //   → 共享三缓冲 pixel_buffers_（与 WPE SHM 路径同一消费端）
 //   → FlPixelBufferTexture（纹理类零改动）
-//
-// 帧驱动：
-//   RegisterEventHandlers() 已通过 webkit_web_view_add_frame_displayed_callback
-//   连接 OnFrameDisplayed，WebKit 每完成一帧渲染即回调 → RequestSnapshot()。
-//   snapshot_pending_ 防重入：上一帧未回则仅置 dirty 标记，回调后补拍，
-//   避免快照请求在 GTK 主循环排队堆积。
+//   帧驱动：snapshot_pending_ 防重入 + 50ms 节拍器。
+//   注：snapshot 在 WebProcess 渲染，与宿主窗口类型无关，popup 宿主上同样可用。
 //
 // 输入桥：
 //   Flutter 指针/滚轮/键盘事件 → 合成 GdkEvent（逻辑坐标，与 WPEPlatform 分支一致）
 //   → gtk_widget_event() 投递到 WebKitWebView 的 GdkWindow。
 //   修饰键位序映射：Dart/WPE（C=1,S=2,A=4,M=8）→ GDK 掩码。
 //
-// 离屏宿主：
-//   GtkOffscreenWindow 提供不映射到屏幕的 GdkWindow 体系，
-//   使 WebKitWebView 可 realize、渲染、接收合成事件。
-//
 // 已知限制（显式声明，不做静默回退）：
 //   - SendTouchEvent：GTK3 无法合法构造 GdkEventSequence，触摸注入暂不支持
 //   - requestPointerLock/Unlock：WebKitGTK 无公开指针锁定 API，返回 false
+//   - IME：popup 宿主下输入法行为待真实中文输入法环境回归验证（与离屏宿主机制相同）
 
 #include "in_app_webview.h"
 
@@ -34,9 +35,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
 #include "../utils/log.h"
 #include "simd_convert.h"
+#include "webkit_gpu_capture.h"
 
 namespace flutter_inappwebview_plugin {
 
@@ -102,10 +105,20 @@ void InAppWebView::InitGtkHost() {
     return;
   }
 
-  // GtkOffscreenWindow：GTK3 官方离屏宿主容器。
-  // 挂入的 widget 获得真实 GdkWindow（GDK_WINDOW_OFFSCREEN），可 realize、
-  // 渲染、接收合成事件，但不映射到屏幕。官方示例用法为 show_all()。
-  gtk_host_window_ = GTK_WINDOW(gtk_offscreen_window_new());
+  // GPU 直通能力检查（X11 + Composite/Damage + EGL_KHR_image_pixmap）。
+  // 不满足时走 snapshot 管线 + GtkOffscreenWindow（原路径，行为不变）。
+  const bool gpu_capable = WebKitGpuCapture::IsSupported(GTK_WIDGET(webview_));
+
+  if (gpu_capable) {
+    // override-redirect popup 定位到完全屏外：XComposite 捕获需要真实原生
+    // X 窗口，GTK3 离屏宿主不产生 X 窗口（探针实证：窗口树中无 webview 窗口）。
+    // 坐标取 -(2*尺寸+256)，任意窗口尺寸均落在 X11 16-bit 坐标界内且不可见。
+    gtk_host_window_ = GTK_WINDOW(gtk_window_new(GTK_WINDOW_POPUP));
+    gtk_window_move(gtk_host_window_, -(2 * width_ + 256), -(2 * height_ + 256));
+  } else {
+    // GtkOffscreenWindow：GTK3 官方离屏宿主容器（snapshot 管线沿用）。
+    gtk_host_window_ = GTK_WINDOW(gtk_offscreen_window_new());
+  }
   gtk_container_add(GTK_CONTAINER(gtk_host_window_), GTK_WIDGET(webview_));
 
   // 保证可聚焦（grab_focus 前置条件）
@@ -125,6 +138,20 @@ void InAppWebView::InitGtkHost() {
 
   gtk_widget_show(GTK_WIDGET(webview_));
   gtk_widget_show(GTK_WIDGET(gtk_host_window_));
+
+  // GPU 直通：宿主就绪后启动捕获（redirect + damage 源 + 首帧别名）。
+  // 帧输出回调在纹理注册后由 AttachGpuCaptureOutput 接线；此前 damage 只计数。
+  if (gpu_capable) {
+    gpu_capture_ = std::make_unique<WebKitGpuCapture>();
+    if (gpu_capture_->Start(GTK_WIDGET(webview_))) {
+      debugLog("InAppWebView(gtk): GPU direct capture active");
+    } else {
+      // 启动失败（redirect 被拒等）：显式报错并回退 snapshot 管线。
+      // snapshot 在 WebProcess 渲染，popup 宿主上同样可用，无需重建宿主。
+      errorLog("InAppWebView(gtk): GPU capture start failed, using snapshot pipeline");
+      gpu_capture_.reset();
+    }
+  }
 
   // 监听 widget 自身 scale 变化（HiDPI 下重出帧）
   gtk_scale_handler_id_ = g_signal_connect(
@@ -157,6 +184,11 @@ void InAppWebView::InitGtkHost() {
 }
 
 void InAppWebView::ShutdownGtkHost() {
+  // 先停捕获：XDamage/redirect 依赖宿主 X 窗口存活
+  if (gpu_capture_ != nullptr) {
+    gpu_capture_->Stop();
+    gpu_capture_.reset();
+  }
   StopSnapshotTicker();
   if (gtk_scale_handler_id_ != 0 && webview_ != nullptr) {
     g_signal_handler_disconnect(webview_, gtk_scale_handler_id_);
@@ -178,8 +210,35 @@ void InAppWebView::ShutdownGtkHost() {
 
 // === Snapshot 管线 ===
 
+bool InAppWebView::IsGpuCaptureActive() const {
+  return gpu_capture_ != nullptr && gpu_capture_->IsActive();
+}
+
+WebKitGpuCapture* InAppWebView::gpu_capture() const {
+  return gpu_capture_.get();
+}
+
+void InAppWebView::AttachGpuCaptureOutput() {
+  if (gpu_capture_ == nullptr || !gpu_capture_->IsActive()) {
+    return;
+  }
+  // damage → on_frame_available_（CustomPlatformView 已将其接到
+  // fl_texture_registrar_mark_texture_frame_available）。接线时补首帧。
+  gpu_capture_->SetOnFrameAvailable([this]() {
+    if (on_frame_available_) {
+      on_frame_available_();
+    }
+  });
+}
+
 void InAppWebView::RequestSnapshot() {
   if (webview_ == nullptr || is_disposing_.load()) {
+    return;
+  }
+  // GPU 直通：帧驱动为 XDamage（webkit_gpu_capture 内部），此处仅处理
+  // resize/scale 变化后的强制补帧。保持方法名以复用调用点。
+  if (gpu_capture_ != nullptr && gpu_capture_->IsActive()) {
+    gpu_capture_->PresentOnce();
     return;
   }
   if (snapshot_pending_) {

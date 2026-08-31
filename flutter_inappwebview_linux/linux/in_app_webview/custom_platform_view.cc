@@ -9,6 +9,8 @@
 #ifndef HAVE_WEBKIT_GTK
 // EGL zero-copy 纹理仅 WPE 后端提供（WebKitGTK 无纹理导出 API）
 #include "inappwebview_egl_texture.h"
+#else
+#include "inappwebview_gpu_texture.h"
 #endif
 #include "inappwebview_texture.h"
 
@@ -106,9 +108,15 @@ CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
   // The EGL texture handles both EGL and SHM modes internally, providing the best
   // performance for each environment.
 #ifdef HAVE_WEBKIT_GTK
-  // WebKitGTK：snapshot → 像素缓冲纹理（唯一公开渲染导出路径）
-  texture_ = FL_TEXTURE(inappwebview_texture_new(webview_.get()));
-  debugLog("CustomPlatformView: using pixel buffer texture (WebKitGTK snapshot)");
+  if (webview_->IsGpuCaptureActive()) {
+    // GPU 直通：XComposite + EGLImage 零拷贝纹理（webkit_gpu_capture 供帧）
+    texture_ = FL_TEXTURE(inappwebview_gpu_texture_new(webview_->gpu_capture()));
+    debugLog("CustomPlatformView: using GPU capture texture (WebKitGTK XComposite+EGLImage)");
+  } else {
+    // snapshot 回退：snapshot → 像素缓冲纹理
+    texture_ = FL_TEXTURE(inappwebview_texture_new(webview_.get()));
+    debugLog("CustomPlatformView: using pixel buffer texture (WebKitGTK snapshot)");
+  }
 #else
   if (UseGLTexture()) {
     texture_ = FL_TEXTURE(inappwebview_egl_texture_new(webview_.get()));
@@ -163,6 +171,13 @@ CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
 #endif
     MarkTextureFrameAvailable();
   });
+
+#ifdef HAVE_WEBKIT_GTK
+  // GPU 直通：纹理注册完成后接入帧输出（damage→mark 接线 + 补首帧）
+  if (webview_->IsGpuCaptureActive()) {
+    webview_->AttachGpuCaptureOutput();
+  }
+#endif
 
   // Set up cursor change callback
   webview_->SetOnCursorChanged(

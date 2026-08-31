@@ -267,10 +267,12 @@ list(APPEND PLUGIN_SOURCES
 )
 
 # Backend-specific sources:
-# - gtk: snapshot-based renderer for WebKitGTK
+# - gtk: GPU direct capture texture (XComposite+EGLImage) + snapshot fallback for WebKitGTK
 # - wpe: EGL zero-copy texture for WPE WebKit
 if(FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
   list(APPEND PLUGIN_SOURCES "in_app_webview/in_app_webview_gtk.cc")
+  list(APPEND PLUGIN_SOURCES "in_app_webview/webkit_gpu_capture.cc")
+  list(APPEND PLUGIN_SOURCES "in_app_webview/inappwebview_gpu_texture.cc")
 else()
   list(APPEND PLUGIN_SOURCES "in_app_webview/inappwebview_egl_texture.cc")
 endif()
@@ -309,8 +311,15 @@ target_include_directories(${PLUGIN_NAME} PRIVATE
   ${EPOXY_INCLUDE_DIRS})
 
 if(FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
+  # GPU 直通捕获依赖：X11 窗口语义 + XComposite redirect + XDamage 帧驱动
+  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+  pkg_check_modules(XCOMPOSITE REQUIRED IMPORTED_TARGET xcomposite)
+  pkg_check_modules(XDAMAGE REQUIRED IMPORTED_TARGET xdamage)
   target_include_directories(${PLUGIN_NAME} PRIVATE ${WEBKIT_GTK_INCLUDE_DIRS})
   target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::WEBKIT_GTK)
+  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::X11)
+  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::XCOMPOSITE)
+  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::XDAMAGE)
 else()
   target_include_directories(${PLUGIN_NAME} PRIVATE ${WPE_WEBKIT_INCLUDE_DIRS})
   target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::WPE_WEBKIT)
@@ -463,6 +472,9 @@ target_include_directories(${TEST_RUNNER} PRIVATE
 if(FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
   target_include_directories(${TEST_RUNNER} PRIVATE ${WEBKIT_GTK_INCLUDE_DIRS})
   target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::WEBKIT_GTK)
+  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::X11)
+  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::XCOMPOSITE)
+  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::XDAMAGE)
 else()
   target_include_directories(${TEST_RUNNER} PRIVATE ${WPE_WEBKIT_INCLUDE_DIRS})
   target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::WPE_WEBKIT)

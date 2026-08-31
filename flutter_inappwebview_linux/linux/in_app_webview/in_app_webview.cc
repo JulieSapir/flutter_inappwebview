@@ -77,6 +77,9 @@
 #include "simd_convert.h"
 #include "user_content_controller.h"
 #include "webview_channel_delegate.h"
+#ifdef HAVE_WEBKIT_GTK
+#include "webkit_gpu_capture.h"  // unique_ptr<WebKitGpuCapture> 析构需完整类型
+#endif
 
 using json = nlohmann::json;
 

@@ -85,6 +85,7 @@ class UserContentController;
 class WebMessageChannel;
 class WebMessageListener;
 class WebViewChannelDelegate;
+class WebKitGpuCapture;
 
 struct InAppWebViewCreationParams {
   int64_t id;
@@ -435,6 +436,15 @@ class InAppWebView {
   //  for channel-protocol compatibility.)
   static bool IsWpeWebKitAvailable();
 
+#ifdef HAVE_WEBKIT_GTK
+  // GPU 直通是否激活（CustomPlatformView 据此选择纹理类型）。
+  bool IsGpuCaptureActive() const;
+  // 捕获器弱访问（供 GPU 纹理构造）。
+  WebKitGpuCapture* gpu_capture() const;
+  // GPU 纹理注册完成后接入帧输出（设置 damage→mark 回调并补首帧）。
+  void AttachGpuCaptureOutput();
+#endif
+
 #ifdef HAVE_WPE_PLATFORM
   // Check if DMA-BUF rendering should be used
   // Returns true if DMA-BUF rendering is expected to work, false if SHM should be used
@@ -526,7 +536,13 @@ class InAppWebView {
   // Offscreen host window: holds the WebKitWebView widget hierarchy without
   // mapping a visible toplevel. Required so the widget can realize/render
   // while the visible output goes through the texture pipeline.
+  // GPU 直通模式下改为 override-redirect 的 GTK_WINDOW_POPUP（屏外定位）：
+  // GTK3 离屏宿主不产生原生 X 窗口，XComposite 捕获需要真实窗口。
   GtkWindow* gtk_host_window_ = nullptr;
+
+  // GPU 直通捕获（XComposite redirect + EGLImage 零拷贝）。
+  // 能力检查不满足时为空，回退 snapshot 管线。
+  std::unique_ptr<WebKitGpuCapture> gpu_capture_ = nullptr;
 
   // Snapshot scheduling state (GTK main thread only)
   bool snapshot_pending_ = false;  // true while an async snapshot is in flight
@@ -695,10 +711,12 @@ class InAppWebView {
 #ifdef HAVE_WEBKIT_GTK
   // === WebKitGTK backend methods (implemented in in_app_webview_gtk.cc) ===
   // Creates the offscreen host window, mounts the widget and realizes it.
+  // GPU 直通能力可用时创建屏外 popup 宿主并启动 XComposite 捕获。
   void InitGtkHost();
   // Destroys the offscreen host window (must run before webview_ is unref'ed).
   void ShutdownGtkHost();
   // Requests an async visible-region snapshot (no-op if one is already in flight).
+  // GPU 直通激活时改道为 PresentOnce（damage 驱动，无快照）。
   void RequestSnapshot();
   // Async callback for webkit_web_view_snapshot().
   static void OnSnapshotReady(GObject* source_object, GAsyncResult* result, gpointer user_data);
@@ -846,9 +864,8 @@ class InAppWebView {
   // (menu, GdkEvent*, rectangle)，旧 4 参签名会把 rectangle 静态指针读进
   // user_data 槽，<select> 下拉弹出即 segfault。
 #ifdef HAVE_WEBKIT_GTK
-  static gboolean OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu,
-                                   GdkEvent* event, WebKitRectangle* rectangle,
-                                   gpointer user_data);
+  static gboolean OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu, GdkEvent* event,
+                                   WebKitRectangle* rectangle, gpointer user_data);
 #else
   static gboolean OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu,
                                    WebKitRectangle* rectangle, gpointer user_data);
