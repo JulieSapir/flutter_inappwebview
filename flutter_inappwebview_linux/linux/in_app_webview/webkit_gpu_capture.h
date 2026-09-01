@@ -16,19 +16,18 @@
 //   → glEGLImageTargetTexture2DOES 绑定为 FlTextureGL 纹理
 //   → Flutter 引擎直接采样合成
 //
-// 对比 snapshot 管线每帧 4 次 CPU 搬运（快照 SHM → SIMD 转换 → 三缓冲 →
-// staging → 上传），本路径每帧仅一次 EGL 导入（实测 ~1.1ms@1024x768），
-// 纹理内容由 GPU 直接产出。
+// 对比已移除的 CPU 软渲染路径每帧 4 次搬运（快照 SHM → SIMD 转换 →
+// 三缓冲 → staging → 上传），本路径每帧仅一次 EGL 导入
+// （实测 ~1.1ms@1024x768），纹理内容由 GPU 直接产出。
 //
 // 帧驱动：XDamage 事件（独立 X 连接，GDK 会抽干默认连接队列导致丢事件，
 // 见探针实证）→ NameWindowPixmap 取当前 backing 别名 → 通知纹理。
 //
 // 宿主要求：webview 必须位于真实（mapped）X 窗口内。GTK3 的
-// GtkOffscreenWindow 不产生原生 X 窗口，无法捕获；因此 GPU 模式下宿主
+// GtkOffscreenWindow 不产生原生 X 窗口，无法捕获；因此宿主
 // 使用 override-redirect 的 GTK_WINDOW_POPUP，定位到屏幕外。
-// snapshot 管线与宿主类型无关（WebProcess 渲染），可安全共存作为回退。
 //
-// 能力检查（IsSupported + Start，任一不满足由调用方回退 snapshot 管线）：
+// 能力检查（IsSupported + Start，任一不满足由调用方显式报错，无回退）：
 //   - X11 后端（Wayland 会话无 X 窗口语义）
 //   - Composite / Damage 扩展
 //   - EGL_KHR_image_pixmap（Mesa X11 平台支持；NVIDIA 私有驱动未验证）

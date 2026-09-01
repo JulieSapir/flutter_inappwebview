@@ -17,170 +17,31 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # nlohmann/json version for JSON parsing
 set(NLOHMANN_JSON_VERSION "3.11.3")
 
-# === Backend selection ===
-#   FLUTTER_INAPPWEBVIEW_LINUX_BACKEND=gtk (default) - WebKitGTK 4.1 (Tauri-style, distro packages)
-#   FLUTTER_INAPPWEBVIEW_LINUX_BACKEND=wpe           - WPE WebKit (legacy, requires manual build)
-set(FLUTTER_INAPPWEBVIEW_LINUX_BACKEND "gtk" CACHE STRING "flutter_inappwebview Linux backend: gtk or wpe")
-
-# === WPE WebKit Backend ===
-# This plugin uses WPE WebKit for offscreen web rendering.
-# WPE WebKit is designed for embedded systems and provides excellent offscreen
-# rendering performance through DMA-BUF buffer sharing.
-#
-# Dual API Support:
-#   - WPEPlatform API (wpe-platform-2.0): NEW default API for WPE WebKit 2.40+
-#   - WPEBackend-FDO (wpebackend-fdo-1.0): Legacy fallback for older systems
-#
-# Required packages:
-#   - wpe-webkit-2.0 (or wpe-webkit-1.1 on older systems)
-#   - wpe-platform-2.0 (preferred) OR wpebackend-fdo-1.0 (fallback)
-#   - libwpe-1.0
-#
-# See WPE_BACKEND.md for installation instructions.
+# === Backend ===
+# 唯一后端：WebKitGTK（webkit2gtk-4.1，Tauri 2 同款，发行版官方包）。
+# 渲染采用 GPU 直通唯一管线（XComposite + Damage + EGLImage 零拷贝，
+# 见 in_app_webview/webkit_gpu_capture.*），无 CPU 软渲染回退。
 
 find_package(PkgConfig REQUIRED)
 
-# Always require epoxy for OpenGL support
+# Always require epoxy for OpenGL/EGL support
 pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
 
-# GTK is still needed for GDK (display access, event handling)
+# GTK is needed for GDK (display access, event handling, input synthesis)
 pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
 
-if(FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
-  message(STATUS "flutter_inappwebview_linux: Using WebKitGTK backend")
-else()
-  message(STATUS "flutter_inappwebview_linux: Using WPE WebKit backend")
+# === WebKitGTK (webkit2gtk-4.1, libsoup3) ===
+# Present in Ubuntu 22.04+, Debian 12+, Fedora, Arch official repositories.
+pkg_check_modules(WEBKIT_GTK REQUIRED IMPORTED_TARGET webkit2gtk-4.1)
+if(WEBKIT_GTK_VERSION VERSION_LESS "2.40")
+  message(WARNING "flutter_inappwebview_linux: WebKitGTK ${WEBKIT_GTK_VERSION} is older than\n"
+                  "recommended 2.40. Some features may be degraded.")
 endif()
-
-# === WPE backend detection (only when backend=wpe) ===
-if(NOT FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
-
-# Try wpe-webkit-2.0 first (newer API), fall back to wpe-webkit-1.1, then wpe-webkit-1.0
-pkg_check_modules(WPE_WEBKIT QUIET IMPORTED_TARGET wpe-webkit-2.0)
-if(NOT WPE_WEBKIT_FOUND)
-  pkg_check_modules(WPE_WEBKIT QUIET IMPORTED_TARGET wpe-webkit-1.1)
-  if(WPE_WEBKIT_FOUND)
-    message(STATUS "flutter_inappwebview_linux: Found wpe-webkit-1.1 (${WPE_WEBKIT_VERSION})")
-  else()
-    pkg_check_modules(WPE_WEBKIT QUIET IMPORTED_TARGET wpe-webkit-1.0)
-    if(WPE_WEBKIT_FOUND)
-      message(STATUS "flutter_inappwebview_linux: Found wpe-webkit-1.0 (${WPE_WEBKIT_VERSION})")
-    endif()
-  endif()
-else()
-  message(STATUS "flutter_inappwebview_linux: Found wpe-webkit-2.0 (${WPE_WEBKIT_VERSION})")
-endif()
-
-if(NOT WPE_WEBKIT_FOUND)
-  message(FATAL_ERROR "WPE WebKit not found. Please install libwpewebkit-1.0-dev (Ubuntu/Debian) or wpe-webkit package.\n"
-                      "See WPE_BACKEND.md or https://wpewebkit.org/about/get-wpe.html")
-endif()
-
-# === WPE Platform API Detection (NEW - default) ===
-# Check for WPEPlatform API first (wpe-platform-2.0) - this is the modern API
-# introduced in WPE WebKit 2.40+ and is the preferred approach.
-pkg_check_modules(WPE_PLATFORM QUIET IMPORTED_TARGET wpe-platform-2.0)
-pkg_check_modules(WPE_PLATFORM_HEADLESS QUIET IMPORTED_TARGET wpe-platform-headless-2.0)
-
-if(WPE_PLATFORM_FOUND AND WPE_PLATFORM_HEADLESS_FOUND)
-  # Additional check: verify that WebKit was actually built WITH WPEPlatform support
-  # The pkg-config file may exist but WebKit headers may not have the required functions
-  # This happens when WPE WebKit is rebuilt without WPEPlatform support
-  include(CheckCXXSourceCompiles)
-  set(CMAKE_REQUIRED_INCLUDES ${WPE_WEBKIT_INCLUDE_DIRS} ${WPE_PLATFORM_INCLUDE_DIRS})
-  set(CMAKE_REQUIRED_LIBRARIES ${WPE_WEBKIT_LIBRARIES} ${WPE_PLATFORM_LIBRARIES})
-  check_cxx_source_compiles("
-    #include <wpe/webkit.h>
-    int main() {
-      WebKitWebView* view = nullptr;
-      webkit_web_view_get_wpe_view(view);
-      return 0;
-    }
-  " WEBKIT_HAS_WPE_PLATFORM_API)
-  
-  if(WEBKIT_HAS_WPE_PLATFORM_API)
-    message(STATUS "flutter_inappwebview_linux: Found wpe-platform-2.0 (WPEPlatform API - DEFAULT)")
-    message(STATUS "flutter_inappwebview_linux: Found wpe-platform-headless-2.0")
-    message(STATUS "flutter_inappwebview_linux: WebKit has WPEPlatform API support (webkit_web_view_get_wpe_view)")
-    set(HAVE_WPE_PLATFORM ON)
-    add_compile_definitions(HAVE_WPE_PLATFORM=1)
-  else()
-    message(STATUS "flutter_inappwebview_linux: wpe-platform-2.0 pkg-config found, but WebKit lacks WPEPlatform API")
-    message(STATUS "flutter_inappwebview_linux: WebKit was likely built without WPEPlatform support, falling back to legacy FDO")
-  endif()
-endif()
-
-# === WPE Backend FDO Detection (Legacy - fallback) ===
-# Check for WPEBackend-FDO as fallback ONLY if WPEPlatform is NOT available
-# WPEPlatform and WPEBackend-FDO are mutually exclusive at compile time
-pkg_check_modules(WPE_FDO QUIET IMPORTED_TARGET wpebackend-fdo-1.0)
-if(WPE_FDO_FOUND AND NOT HAVE_WPE_PLATFORM)
-  message(STATUS "flutter_inappwebview_linux: Found wpebackend-fdo-1.0 (Legacy FDO API)")
-  set(HAVE_WPE_FDO ON)
-  add_compile_definitions(HAVE_WPE_BACKEND_LEGACY=1)
-elseif(WPE_FDO_FOUND AND HAVE_WPE_PLATFORM)
-  message(STATUS "flutter_inappwebview_linux: wpebackend-fdo-1.0 available but not used (WPEPlatform preferred)")
-endif()
-
-# Require at least one backend
-if(NOT HAVE_WPE_PLATFORM AND NOT HAVE_WPE_FDO)
-  message(FATAL_ERROR "Neither WPEPlatform (wpe-platform-2.0) nor WPEBackend-FDO (wpebackend-fdo-1.0) found.\n"
-                      "Please install one of:\n"
-                      "  - WPE WebKit 2.40+ with WPEPlatform support (recommended)\n"
-                      "  - wpebackend-fdo-1.0-dev (legacy fallback)\n"
-                      "See WPE_BACKEND.md for installation instructions.")
-endif()
-
-# Check for libwpe
-pkg_check_modules(LIBWPE QUIET IMPORTED_TARGET wpe-1.0)
-if(NOT LIBWPE_FOUND)
-  message(FATAL_ERROR "libwpe (wpe-1.0) not found. Please install libwpe-1.0-dev.")
-endif()
-
-endif()  # end of WPE backend detection
-
-if(FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
-  # === WebKitGTK backend (default) ===
-  # Requires webkit2gtk-4.1 (libsoup3). Present in Ubuntu 22.04+, Debian 12+,
-  # Fedora, Arch official repositories - same requirement as Tauri 2.
-  pkg_check_modules(WEBKIT_GTK REQUIRED IMPORTED_TARGET webkit2gtk-4.1)
-  if(WEBKIT_GTK_VERSION VERSION_LESS "2.40")
-    message(WARNING "flutter_inappwebview_linux: WebKitGTK ${WEBKIT_GTK_VERSION} is older than\n"
-                    "recommended 2.40. Some features may be degraded.")
-  endif()
-  add_compile_definitions(HAVE_WEBKIT_GTK=1)
-  message(STATUS "flutter_inappwebview_linux: Found webkit2gtk-4.1 (${WEBKIT_GTK_VERSION})")
-endif()
+message(STATUS "flutter_inappwebview_linux: Found webkit2gtk-4.1 (${WEBKIT_GTK_VERSION})")
 
 # Check for libsecret for secure credential storage
 pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
 message(STATUS "flutter_inappwebview_linux: Found libsecret-1 (${LIBSECRET_VERSION})")
-
-if(NOT FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
-# Find wayland-server for SHM buffer handling
-pkg_check_modules(WAYLAND_SERVER REQUIRED IMPORTED_TARGET wayland-server)
-endif()
-
-# Enable SIMD optimizations for color conversion
-# These flags enable NEON on ARM64 and SSE/SSSE3 on x86_64
-include(CheckCXXCompilerFlag)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
-  # ARM64: NEON is always available
-  message(STATUS "flutter_inappwebview_linux: ARM64 detected, NEON enabled")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
-  # x86_64: Check for SSSE3 support
-  check_cxx_compiler_flag("-mssse3" COMPILER_SUPPORTS_SSSE3)
-  if(COMPILER_SUPPORTS_SSSE3)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mssse3")
-    message(STATUS "flutter_inappwebview_linux: x86_64 with SSSE3 enabled")
-  else()
-    check_cxx_compiler_flag("-msse2" COMPILER_SUPPORTS_SSE2)
-    if(COMPILER_SUPPORTS_SSE2)
-      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse2")
-      message(STATUS "flutter_inappwebview_linux: x86_64 with SSE2 enabled")
-    endif()
-  endif()
-endif()
 
 # === nlohmann/json dependency for JSON parsing ===
 include(FetchContent)
@@ -203,7 +64,6 @@ list(APPEND PLUGIN_SOURCES
   "cookie_manager.cc"
   "credential_database.cc"
   "proxy_manager.cc"
-  "utils/software_rendering.cc"
   "web_storage_manager.cc"
   "webview_environment.cc"
   "content_blocker/content_blocker_handler.cc"
@@ -218,11 +78,13 @@ list(APPEND PLUGIN_SOURCES
   "in_app_browser/in_app_browser_settings.cc"
   "in_app_webview/in_app_webview_manager.cc"
   "in_app_webview/custom_platform_view.cc"
-  "in_app_webview/inappwebview_texture.cc"
   "in_app_webview/in_app_webview.cc"
+  "in_app_webview/in_app_webview_gtk.cc"
   "in_app_webview/in_app_webview_settings.cc"
   "in_app_webview/user_content_controller.cc"
   "in_app_webview/webview_channel_delegate.cc"
+  "in_app_webview/webkit_gpu_capture.cc"
+  "in_app_webview/inappwebview_gpu_texture.cc"
   "types/channel_delegate.cc"
   "types/client_cert_challenge.cc"
   "types/client_cert_response.cc"
@@ -266,17 +128,6 @@ list(APPEND PLUGIN_SOURCES
   "web_message/web_message_listener_channel_delegate.cc"
 )
 
-# Backend-specific sources:
-# - gtk: GPU direct capture texture (XComposite+EGLImage) + snapshot fallback for WebKitGTK
-# - wpe: EGL zero-copy texture for WPE WebKit
-if(FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
-  list(APPEND PLUGIN_SOURCES "in_app_webview/in_app_webview_gtk.cc")
-  list(APPEND PLUGIN_SOURCES "in_app_webview/webkit_gpu_capture.cc")
-  list(APPEND PLUGIN_SOURCES "in_app_webview/inappwebview_gpu_texture.cc")
-else()
-  list(APPEND PLUGIN_SOURCES "in_app_webview/inappwebview_egl_texture.cc")
-endif()
-
 # Define the plugin library target. Its name must not be changed (see comment
 # on PLUGIN_NAME above).
 add_library(${PLUGIN_NAME} SHARED
@@ -295,9 +146,6 @@ set_target_properties(${PLUGIN_NAME} PROPERTIES
   CXX_VISIBILITY_PRESET hidden)
 target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 
-# Set RPATH so the plugin loads bundled WPE libraries from the same directory.
-# $ORIGIN refers to the directory containing the plugin shared library.
-# This eliminates the need for LD_LIBRARY_PATH or launcher scripts.
 set_target_properties(${PLUGIN_NAME} PROPERTIES
   INSTALL_RPATH "$ORIGIN"
   BUILD_RPATH "$ORIGIN"
@@ -308,130 +156,30 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(${PLUGIN_NAME} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}"
-  ${EPOXY_INCLUDE_DIRS})
-
-if(FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
-  # GPU 直通捕获依赖：X11 窗口语义 + XComposite redirect + XDamage 帧驱动
-  pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
-  pkg_check_modules(XCOMPOSITE REQUIRED IMPORTED_TARGET xcomposite)
-  pkg_check_modules(XDAMAGE REQUIRED IMPORTED_TARGET xdamage)
-  target_include_directories(${PLUGIN_NAME} PRIVATE ${WEBKIT_GTK_INCLUDE_DIRS})
-  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::WEBKIT_GTK)
-  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::X11)
-  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::XCOMPOSITE)
-  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::XDAMAGE)
-else()
-  target_include_directories(${PLUGIN_NAME} PRIVATE ${WPE_WEBKIT_INCLUDE_DIRS})
-  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::WPE_WEBKIT)
-  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::LIBWPE)
-  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::WAYLAND_SERVER)
-endif()
+  ${EPOXY_INCLUDE_DIRS}
+  ${WEBKIT_GTK_INCLUDE_DIRS})
 
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::EPOXY)
+target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::WEBKIT_GTK)
 target_link_libraries(${PLUGIN_NAME} PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::LIBSECRET)
 
-# Link WPEPlatform if available (new API - default)
-if(HAVE_WPE_PLATFORM)
-  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::WPE_PLATFORM)
-  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::WPE_PLATFORM_HEADLESS)
-endif()
-
-# Link WPEBackend-FDO if available (legacy fallback)
-if(HAVE_WPE_FDO)
-  target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::WPE_FDO)
-endif()
+# GPU 直通捕获依赖：X11 窗口语义 + XComposite redirect + XDamage 帧驱动
+pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+pkg_check_modules(XCOMPOSITE REQUIRED IMPORTED_TARGET xcomposite)
+pkg_check_modules(XDAMAGE REQUIRED IMPORTED_TARGET xdamage)
+target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::X11)
+target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::XCOMPOSITE)
+target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::XDAMAGE)
 
 # === Library Bundling ===
-# Collect WPE libraries to bundle with the application
-# This ensures the app can run without setting LD_LIBRARY_PATH
-# (WPE backend only - WebKitGTK ships via system packages)
-
-set(WPE_BUNDLED_LIBS "")
-
-if(FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
-  # No bundled libraries needed for WebKitGTK backend
-  set(flutter_inappwebview_linux_bundled_libraries
-    ${WPE_BUNDLED_LIBS}
-    PARENT_SCOPE
-  )
-endif()
-
-if(NOT FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
-
-# Helper function to find and add real shared library files (resolving symlinks)
-function(find_and_add_library LIB_NAME SEARCH_PATHS OUT_LIST)
-  foreach(SEARCH_PATH ${SEARCH_PATHS})
-    # Look for the versioned .so file (e.g., libwpe-1.0.so.1.10.0)
-    file(GLOB LIB_FILES "${SEARCH_PATH}/${LIB_NAME}.so.*.*.*")
-    if(NOT LIB_FILES)
-      # Try less specific pattern (e.g., libwpe-1.0.so.1)
-      file(GLOB LIB_FILES "${SEARCH_PATH}/${LIB_NAME}.so.*")
-    endif()
-    if(LIB_FILES)
-      # Get the first matching file
-      list(GET LIB_FILES 0 LIB_FILE)
-      # Resolve symlinks to get the real file
-      get_filename_component(REAL_LIB "${LIB_FILE}" REALPATH)
-      if(EXISTS "${REAL_LIB}")
-        list(APPEND ${OUT_LIST} "${REAL_LIB}")
-        set(${OUT_LIST} ${${OUT_LIST}} PARENT_SCOPE)
-        message(STATUS "flutter_inappwebview_linux: Will bundle ${REAL_LIB}")
-        return()
-      endif()
-    endif()
-  endforeach()
-  message(WARNING "flutter_inappwebview_linux: Could not find ${LIB_NAME} to bundle")
-endfunction()
-
-# Get library directories from pkg-config
-set(WPE_LIB_DIRS "")
-if(WPE_WEBKIT_LIBRARY_DIRS)
-  list(APPEND WPE_LIB_DIRS ${WPE_WEBKIT_LIBRARY_DIRS})
-endif()
-if(LIBWPE_LIBRARY_DIRS)
-  list(APPEND WPE_LIB_DIRS ${LIBWPE_LIBRARY_DIRS})
-endif()
-if(HAVE_WPE_FDO AND WPE_FDO_LIBRARY_DIRS)
-  list(APPEND WPE_LIB_DIRS ${WPE_FDO_LIBRARY_DIRS})
-endif()
-# Add common paths as fallback
-list(APPEND WPE_LIB_DIRS 
-  "/usr/local/lib"
-  "/usr/local/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
-  "/usr/lib"
-  "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
-)
-list(REMOVE_DUPLICATES WPE_LIB_DIRS)
-
-# Find WPE WebKit library
-find_and_add_library("libWPEWebKit-2.0" "${WPE_LIB_DIRS}" WPE_BUNDLED_LIBS)
-
-# Find libwpe library  
-find_and_add_library("libwpe-1.0" "${WPE_LIB_DIRS}" WPE_BUNDLED_LIBS)
-
-# WPEPlatform is built into libWPEWebKit-2.0 on modern builds, so there are
-# no separate libWPEPlatform*.so files to bundle.
-
-# Find WPE Backend FDO library (legacy fallback)
-if(HAVE_WPE_FDO)
-  find_and_add_library("libWPEBackend-fdo-1.0" "${WPE_LIB_DIRS}" WPE_BUNDLED_LIBS)
-endif()
-
-# Also need to create symlinks for the sonames that the libraries expect
-# This will be handled at install time in the example CMakeLists.txt
-
+# WebKitGTK 经由系统包提供，无需打包额外库。
 set(flutter_inappwebview_linux_bundled_libraries
-  ${WPE_BUNDLED_LIBS}
+  ""
   PARENT_SCOPE
 )
-
-endif()  # end of WPE library bundling
-
-# Export library info for downstream use
-set(FLUTTER_INAPPWEBVIEW_WPE_LIBS ${WPE_BUNDLED_LIBS} CACHE INTERNAL "WPE libraries to bundle")
 
 # === Tests ===
 # These unit tests can be run from a terminal after building the example.
@@ -466,33 +214,19 @@ add_executable(${TEST_RUNNER}
   ${PLUGIN_SOURCES}
 )
 apply_standard_settings(${TEST_RUNNER})
-target_include_directories(${TEST_RUNNER} PRIVATE 
-  "${CMAKE_CURRENT_SOURCE_DIR}" 
-  ${EPOXY_INCLUDE_DIRS})
-if(FLUTTER_INAPPWEBVIEW_LINUX_BACKEND STREQUAL "gtk")
-  target_include_directories(${TEST_RUNNER} PRIVATE ${WEBKIT_GTK_INCLUDE_DIRS})
-  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::WEBKIT_GTK)
-  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::X11)
-  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::XCOMPOSITE)
-  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::XDAMAGE)
-else()
-  target_include_directories(${TEST_RUNNER} PRIVATE ${WPE_WEBKIT_INCLUDE_DIRS})
-  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::WPE_WEBKIT)
-  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::LIBWPE)
-  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::WAYLAND_SERVER)
-endif()
+target_include_directories(${TEST_RUNNER} PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+  ${EPOXY_INCLUDE_DIRS}
+  ${WEBKIT_GTK_INCLUDE_DIRS})
 target_link_libraries(${TEST_RUNNER} PRIVATE flutter)
 target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::GTK)
 target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::EPOXY)
+target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::WEBKIT_GTK)
+target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::X11)
+target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::XCOMPOSITE)
+target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::XDAMAGE)
 target_link_libraries(${TEST_RUNNER} PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::LIBSECRET)
-if(HAVE_WPE_PLATFORM)
-  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::WPE_PLATFORM)
-  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::WPE_PLATFORM_HEADLESS)
-endif()
-if(HAVE_WPE_FDO)
-  target_link_libraries(${TEST_RUNNER} PRIVATE PkgConfig::WPE_FDO)
-endif()
 target_link_libraries(${TEST_RUNNER} PRIVATE gtest_main gmock)
 
 # Enable automatic test discovery.

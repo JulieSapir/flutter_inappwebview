@@ -1,9 +1,9 @@
-// WPE WebKit-based InAppWebView implementation
+// InAppWebView implementation (WebKitGTK).
 //
-// This file provides offscreen web rendering using WPE WebKit.
-// Supports two backend APIs:
-// - WPEPlatform (HAVE_WPE_PLATFORM): New modern API for WPE WebKit 2.40+
-// - WPEBackend-FDO (HAVE_WPE_BACKEND_LEGACY): Legacy API for older systems
+// 渲染采用 GPU 直通唯一管线：XComposite redirect + Damage 驱动 +
+// EGLImage 零拷贝（webkit_gpu_capture.*）。widget 挂屏外 popup 宿主，
+// 输入合成 GdkEvent（实现见 in_app_webview_gtk.cc）。不再有 snapshot
+// CPU 回退管线：能力不满足时显式报错。
 
 #include "in_app_webview.h"
 
@@ -24,20 +24,6 @@
 // Use epoxy for OpenGL/EGL instead of direct headers to avoid conflicts
 #include <epoxy/egl.h>
 #include <epoxy/gl.h>
-
-// WPEPlatform API (new modern API)
-#ifdef HAVE_WPE_PLATFORM
-#include <wpe/WPEBufferSHM.h>  // For SHM software rendering fallback
-#include <wpe/headless/wpe-headless.h>
-#include <wpe/wpe-platform.h>
-#endif
-
-// WPEBackend-FDO API (legacy)
-#ifdef HAVE_WPE_BACKEND_LEGACY
-#include <wayland-server.h>
-#include <wpe/fdo-egl.h>
-#include <wpe/unstable/fdo-shm.h>
-#endif
 
 // Cairo for PNG encoding (used by takeScreenshot)
 #include <cairo.h>
@@ -74,12 +60,9 @@
 #include "../web_message/web_message_channel.h"
 #include "../web_message/web_message_listener.h"
 #include "in_app_webview_manager.h"
-#include "simd_convert.h"
 #include "user_content_controller.h"
-#include "webview_channel_delegate.h"
-#ifdef HAVE_WEBKIT_GTK
 #include "webkit_gpu_capture.h"  // unique_ptr<WebKitGpuCapture> 析构需完整类型
-#endif
+#include "webview_channel_delegate.h"
 
 using json = nlohmann::json;
 
@@ -115,15 +98,6 @@ struct FileChooserContext {
 #include <gdk/gdkx.h>
 #endif
 
-// C-style callback functions outside the namespace for C API compatibility
-#ifdef HAVE_WPE_BACKEND_LEGACY
-extern "C" {
-static void wpe_export_fdo_egl_image_callback(void* data, struct wpe_fdo_egl_exported_image* image);
-
-static void wpe_export_shm_buffer_callback(void* data, struct wpe_fdo_shm_exported_buffer* buffer);
-}
-#endif
-
 namespace flutter_inappwebview_plugin {
 
 namespace {
@@ -149,99 +123,11 @@ std::string GenerateRandomSecret(size_t length = 32) {
 
 }  // namespace
 
-#ifdef HAVE_WPE_BACKEND_LEGACY
-// Get the directory where the executable is located (only needed for legacy backend)
-static std::string GetExecutableDir() {
-  char path[PATH_MAX];
-  ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
-  if (len != -1) {
-    path[len] = '\0';
-    std::string exe_path(path);
-    size_t last_slash = exe_path.rfind('/');
-    if (last_slash != std::string::npos) {
-      return exe_path.substr(0, last_slash);
-    }
-  }
-  return "";
-}
-#endif
-
 bool InAppWebView::IsWpeWebKitAvailable() {
-#ifdef HAVE_WEBKIT_GTK
-  // WebKitGTK 由构建系统保证存在（pkg-config REQUIRED），无需运行时探测
+  // WebKitGTK 由构建系统保证存在（pkg-config REQUIRED），无需运行时探测。
+  // 方法名保留 WPE 字样仅为 Dart 侧通道协议兼容。
   return true;
-#else
-  static bool checked = false;
-  static bool available = false;
-
-  if (checked) {
-    return available;
-  }
-  checked = true;
-
-#ifdef HAVE_WPE_PLATFORM
-  // WPEPlatform API: No loader initialization needed
-  // The platform is initialized when we create a WPEDisplay
-  debugLog("InAppWebView: Using WPEPlatform API (modern)");
-  available = true;
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  // Legacy WPEBackend-FDO: Need to initialize the loader
-  // Try to load the WPE backend library
-  // First, try to load from the bundled lib/ directory using the full path.
-  std::string exe_dir = GetExecutableDir();
-  if (!exe_dir.empty()) {
-    std::string bundled_lib_path = exe_dir + "/lib/libWPEBackend-fdo-1.0.so.1";
-    std::string bundled_lib_dir = exe_dir + "/lib";
-
-    // Check if the bundled library exists
-    if (access(bundled_lib_path.c_str(), F_OK) == 0) {
-      // Set environment variables for the WPE WebProcess child process.
-      setenv("WPE_BACKEND_LIBRARY", bundled_lib_path.c_str(), 0);
-
-      // Also prepend the lib directory to LD_LIBRARY_PATH
-      const char* current_ld_path = getenv("LD_LIBRARY_PATH");
-      std::string new_ld_path = bundled_lib_dir;
-      if (current_ld_path != nullptr && strlen(current_ld_path) > 0) {
-        new_ld_path += ":";
-        new_ld_path += current_ld_path;
-      }
-      setenv("LD_LIBRARY_PATH", new_ld_path.c_str(), 1);
-
-      available = wpe_loader_init(bundled_lib_path.c_str()) != 0;
-    }
-  }
-
-  // Fall back to system library if bundled version not found or failed to load
-  if (!available) {
-    available = wpe_loader_init("libWPEBackend-fdo-1.0.so.1") != 0;
-  }
-
-  if (available) {
-    debugLog("InAppWebView: Using WPEBackend-FDO API (legacy)");
-  }
-#else
-  // Neither WPE backend is available; this branch is only compiled when the
-  // WebKitGTK backend is not selected, so this is a build configuration error.
-  return false;
-#endif  // !HAVE_WEBKIT_GTK
-
-  return available;
-#endif  // HAVE_WEBKIT_GTK
 }
-
-#ifdef HAVE_WPE_PLATFORM
-// Check if DMA-BUF rendering should be used (called at WebView initialization)
-// Returns true if DMA-BUF rendering is expected to work
-// Note: The actual environment detection and LIBGL_ALWAYS_SOFTWARE setting
-// is now done at plugin registration time via utils/software_rendering.h
-bool InAppWebView::PreflightDmaBufSupport() {
-  const char* sw_env = getenv("LIBGL_ALWAYS_SOFTWARE");
-  if (sw_env && (strcmp(sw_env, "1") == 0 || strcasecmp(sw_env, "true") == 0)) {
-    return false;  // Software rendering mode
-  }
-  return true;  // Hardware rendering mode
-}
-#endif
 
 InAppWebView::InAppWebView(FlPluginRegistrar* registrar, FlBinaryMessenger* messenger, int64_t id,
                            const InAppWebViewCreationParams& params)
@@ -264,22 +150,11 @@ InAppWebView::InAppWebView(FlPluginRegistrar* registrar, FlBinaryMessenger* mess
     context_menu_config_ = params.contextMenu.value();
   }
 
-  InitWpeBackend();
   InitWebView(params);
   RegisterEventHandlers();
 
-  // Set up monitor change handlers and initial refresh rate (like Cog browser does)
-  // This helps WPE synchronize frame production with the display
-  SetupMonitorChangeHandlers();
-  UpdateMonitorRefreshRate();
-
   if (settings_) {
     settings_->applyToWebView(webview_);
-#ifdef HAVE_WPE_PLATFORM
-    if (wpe_display_ != nullptr) {
-      settings_->applyWpePlatformSettings(wpe_display_);
-    }
-#endif
   }
 
   RegisterCustomSchemes();
@@ -375,8 +250,6 @@ void InAppWebView::AttachChannel(FlBinaryMessenger* messenger, const std::string
 InAppWebView::~InAppWebView() {
   debugLog("dealloc InAppWebView");
 
-  CleanupMonitorChangeHandlers();
-
   context_menu_popup_.reset();
 
   if (findInteractionController_) {
@@ -436,8 +309,7 @@ InAppWebView::~InAppWebView() {
   }
   pending_policy_decisions_.clear();
 
-#ifdef HAVE_WEBKIT_GTK
-  // === WebKitGTK proper shutdown ===
+  // === 正常关停 ===
   is_disposing_.store(true);
 
   ShutdownGtkHost();
@@ -446,389 +318,12 @@ InAppWebView::~InAppWebView() {
     g_object_unref(webview_);
     webview_ = nullptr;
   }
-#elif defined(HAVE_WPE_PLATFORM)
-  // === WPEPlatform proper shutdown sequence ===
-  // Mark as disposing to prevent buffer callbacks from processing
-  is_disposing_.store(true);
-
-  // 1. First disconnect signals to stop receiving callbacks
-  if (wpe_view_ != nullptr && buffer_rendered_handler_ != 0) {
-    g_signal_handler_disconnect(wpe_view_, buffer_rendered_handler_);
-    buffer_rendered_handler_ = 0;
-  }
-  // Note: scale_changed_handler_ is connected to gtk_window_, not wpe_view_
-  if (gtk_window_ != nullptr && scale_changed_handler_ != 0) {
-    g_signal_handler_disconnect(gtk_window_, scale_changed_handler_);
-    scale_changed_handler_ = 0;
-  }
-
-  if (wpe_view_ != nullptr) {
-    wpe_view_focus_out(wpe_view_);
-  }
-
-  if (wpe_view_ != nullptr) {
-    wpe_view_unmap(wpe_view_);
-  }
-
-  // 4. Release any pending buffer back to WPE and clean up EGL image
-  {
-    std::lock_guard<std::mutex> lock(wpe_buffer_mutex_);
-
-    // Clean up EGL image first (while display is still valid)
-    if (current_egl_image_ != nullptr && egl_display_ != nullptr) {
-      static PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR = nullptr;
-      if (eglDestroyImageKHR == nullptr) {
-        eglDestroyImageKHR = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
-      }
-      if (eglDestroyImageKHR != nullptr) {
-        eglDestroyImageKHR(static_cast<EGLDisplay>(egl_display_),
-                           static_cast<EGLImageKHR>(current_egl_image_));
-      }
-      current_egl_image_ = nullptr;
-    }
-
-    // Release pending buffer back to WPE
-    if (current_buffer_ != nullptr && wpe_view_ != nullptr) {
-      wpe_view_buffer_released(wpe_view_, current_buffer_);
-    }
-    current_buffer_ = nullptr;
-    current_buffer_width_ = 0;
-    current_buffer_height_ = 0;
-  }
-
-  if (wpe_view_ != nullptr) {
-    wpe_view_closed(wpe_view_);
-  }
-
-  wpe_view_ = nullptr;
-  wpe_toplevel_ = nullptr;
-
-  if (webview_ != nullptr) {
-    g_object_unref(webview_);
-    webview_ = nullptr;
-  }
-
-  if (wpe_display_ != nullptr) {
-    g_object_unref(wpe_display_);
-    wpe_display_ = nullptr;
-  }
-
-  egl_display_ = nullptr;
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  {
-    std::lock_guard<std::mutex> lock(exported_image_mutex_);
-    if (exported_image_ != nullptr && exportable_ != nullptr) {
-      ::wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(exportable_,
-                                                                            exported_image_);
-      exported_image_ = nullptr;
-    }
-  }
-
-  if (webview_ != nullptr) {
-    g_object_unref(webview_);
-    webview_ = nullptr;
-  }
-#endif  // HAVE_WEBKIT_GTK / WPE_PLATFORM / WPE_BACKEND_LEGACY (destructor)
-}
-
-void InAppWebView::InitWpeBackend() {
-#ifdef HAVE_WEBKIT_GTK
-  // WebKitGTK 后端无需预创建 display/backend，
-  // WebKitWebView 直接创建并在 InitGtkHost() 挂载到离屏宿主
-  return;
-#else
-  if (!IsWpeWebKitAvailable()) {
-    errorLog("InAppWebView: WPE WebKit not available");
-    return;
-  }
-
-#ifdef HAVE_WPE_PLATFORM
-  // === WPEPlatform API (Modern) ===
-
-  // NOTE: The DMA-BUF preflight check and LIBGL_ALWAYS_SOFTWARE setup
-  // is now done at plugin registration time via RunEarlyPreflightCheck().
-  // This ensures the environment is set BEFORE any WPEDisplay is created.
-
-  // Create a headless display for offscreen rendering
-  GError* error = nullptr;
-
-  wpe_display_ = wpe_display_headless_new();
-  if (wpe_display_ == nullptr) {
-    errorLog("InAppWebView: Failed to create WPEDisplayHeadless");
-    return;
-  }
-
-  // Connect the display
-  if (!wpe_display_connect(wpe_display_, &error)) {
-    errorLog("InAppWebView: Failed to connect WPEDisplay: " +
-             std::string(error ? error->message : "unknown"));
-    g_clear_error(&error);
-    g_clear_object(&wpe_display_);
-    return;
-  }
-
-  // Get EGL display from WPEDisplay for texture operations
-  egl_display_ = wpe_display_get_egl_display(wpe_display_, &error);
-  if (egl_display_ == nullptr) {
-    // Software rendering mode - no EGL display available
-    g_clear_error(&error);
-  }
-
-  // Note: The WebView will be created in InitWebView() using the "display" property
-  // WPEView and WPEToplevel are obtained from the WebView after creation
-
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  // === WPEBackend-FDO API (Legacy) ===
-
-  // Get EGL display from GDK
-  EGLDisplay egl_display = EGL_NO_DISPLAY;
-  GdkDisplay* gdk_display = gdk_display_get_default();
-
-  if (gdk_display != nullptr) {
-#ifdef GDK_WINDOWING_WAYLAND
-    if (GDK_IS_WAYLAND_DISPLAY(gdk_display)) {
-      struct wl_display* wl_display = gdk_wayland_display_get_wl_display(gdk_display);
-      if (wl_display != nullptr) {
-        egl_display = eglGetDisplay((EGLNativeDisplayType)wl_display);
-      }
-    }
-#endif
-#ifdef GDK_WINDOWING_X11
-    if (egl_display == EGL_NO_DISPLAY && GDK_IS_X11_DISPLAY(gdk_display)) {
-      Display* x11_display = gdk_x11_display_get_xdisplay(gdk_display);
-      if (x11_display != nullptr) {
-        egl_display = eglGetDisplay((EGLNativeDisplayType)x11_display);
-      }
-    }
-#endif
-  }
-
-  // If we couldn't get an EGL display, try the default
-  if (egl_display == EGL_NO_DISPLAY) {
-    egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-  }
-
-  // Initialize EGL if needed
-  if (egl_display != EGL_NO_DISPLAY) {
-    EGLint major, minor;
-    if (!eglInitialize(egl_display, &major, &minor)) {
-      errorLog("InAppWebView: Failed to initialize EGL");
-      egl_display = EGL_NO_DISPLAY;
-    }
-  }
-
-  egl_display_ = egl_display;
-
-  // Initialize WPE FDO with the EGL display
-  if (!wpe_fdo_initialize_for_egl_display(egl_display)) {
-    errorLog("InAppWebView: Failed to initialize WPE FDO");
-    // Try again with headless mode
-    if (!wpe_fdo_initialize_for_egl_display(EGL_NO_DISPLAY)) {
-      errorLog("InAppWebView: Failed to initialize WPE FDO in headless mode");
-    }
-  }
-
-  // Create the exportable backend for DMA-BUF export
-  static struct wpe_view_backend_exportable_fdo_egl_client exportable_client = {
-      nullptr,                            // export_egl_image callback (legacy)
-      wpe_export_fdo_egl_image_callback,  // export_fdo_egl_image callback
-      wpe_export_shm_buffer_callback,     // export_shm_buffer callback
-      nullptr, nullptr                    // reserved
-  };
-
-  exportable_ =
-      wpe_view_backend_exportable_fdo_egl_create(&exportable_client, this, width_, height_);
-
-  if (exportable_ == nullptr) {
-    errorLog("InAppWebView: Failed to create WPE exportable backend");
-    return;
-  }
-
-  wpe_backend_ = wpe_view_backend_exportable_fdo_get_view_backend(exportable_);
-
-  // Create WebKit backend wrapper
-  backend_ = webkit_web_view_backend_new(
-      wpe_backend_,
-      [](gpointer data) {
-        auto* exportable = static_cast<struct wpe_view_backend_exportable_fdo*>(data);
-        wpe_view_backend_exportable_fdo_destroy(exportable);
-      },
-      exportable_);
-
-  wpe_view_backend_dispatch_set_device_scale_factor(wpe_backend_, scale_factor_);
-
-  // Set initial activity state
-  wpe_view_backend_add_activity_state(wpe_backend_, wpe_view_activity_state_visible);
-  wpe_view_backend_add_activity_state(wpe_backend_, wpe_view_activity_state_in_window);
-  wpe_view_backend_add_activity_state(wpe_backend_, wpe_view_activity_state_focused);
-
-  // Set up fullscreen handler for DOM fullscreen requests
-  wpe_view_backend_set_fullscreen_handler(
-      wpe_backend_,
-      [](void* data, bool fullscreen) -> bool {
-        auto* self = static_cast<InAppWebView*>(data);
-        return self->OnDomFullscreenRequest(fullscreen);
-      },
-      this);
-
-  // Set up pointer lock handler for games/immersive applications
-  wpe_view_backend_set_pointer_lock_handler(
-      wpe_backend_,
-      [](void* data, bool lock) -> bool {
-        auto* self = static_cast<InAppWebView*>(data);
-        return self->OnPointerLockRequest(lock);
-      },
-      this);
-#endif  // HAVE_WPE_PLATFORM || HAVE_WPE_BACKEND_LEGACY
-#endif  // HAVE_WEBKIT_GTK
 }
 
 void InAppWebView::InitWebView(const InAppWebViewCreationParams& params) {
-#ifdef HAVE_WPE_PLATFORM
-  // === WPEPlatform API ===
-  // With WPEPlatform, we pass the "display" property to create the WebView
-  // The WPEView is automatically created by WebKit
-
-  if (wpe_display_ == nullptr) {
-    errorLog("InAppWebView: Cannot create webview without WPEDisplay");
-    return;
-  }
-
-  // Create WebKit settings
-  WebKitSettings* settings = webkit_settings_new();
-
-  bool useIncognito = params.initialSettings && params.initialSettings->incognito;
-  WebKitNetworkSession* networkSession = nullptr;
-
-  if (useIncognito) {
-    networkSession = webkit_network_session_new_ephemeral();
-    debugLog("InAppWebView: Creating WebView with ephemeral (incognito) network session");
-  }
-
-  WebKitWebContext* webContext = params.webContext;
-
-  // Check if we're creating a related webview (for multi-window support)
-  if (params.relatedWebView != nullptr) {
-    webview_ = WEBKIT_WEB_VIEW(
-        g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", wpe_display_, "user-content-manager",
-                     webkit_web_view_get_user_content_manager(params.relatedWebView), "settings",
-                     webkit_web_view_get_settings(params.relatedWebView), "related-view",
-                     params.relatedWebView, nullptr));
-  } else if (webContext != nullptr) {
-    if (networkSession != nullptr) {
-      webview_ = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", wpe_display_,
-                                              "web-context", webContext, "network-session",
-                                              networkSession, "settings", settings, nullptr));
-    } else {
-      webview_ =
-          WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", wpe_display_, "web-context",
-                                       webContext, "settings", settings, nullptr));
-    }
-  } else if (networkSession != nullptr) {
-    webview_ = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", wpe_display_,
-                                            "network-session", networkSession, "settings", settings,
-                                            nullptr));
-  } else {
-    webview_ = WEBKIT_WEB_VIEW(
-        g_object_new(WEBKIT_TYPE_WEB_VIEW, "display", wpe_display_, "settings", settings, nullptr));
-  }
-
-  g_object_unref(settings);
-
-  if (webview_ == nullptr) {
-    errorLog("InAppWebView: Failed to create WebKitWebView with WPEPlatform");
-    if (networkSession != nullptr) {
-      g_object_unref(networkSession);
-    }
-    return;
-  }
-
-  // Get WPEView from the WebView (created automatically by WebKit)
-  wpe_view_ = webkit_web_view_get_wpe_view(webview_);
-  if (wpe_view_ == nullptr) {
-    errorLog("InAppWebView: Failed to get WPEView from WebView");
-    g_object_unref(webview_);
-    webview_ = nullptr;
-    return;
-  }
-
-  // Note: Scale factor in WPEPlatform is read from the display, not set directly
-  // The WPEDisplay handles scale factor automatically based on the output
-
-  // IMPORTANT: Connect to buffer-rendered signal BEFORE mapping the view
-  // This ensures we don't miss the first frame that WPE renders after mapping
-  buffer_rendered_handler_ =
-      g_signal_connect(wpe_view_, "buffer-rendered",
-                       G_CALLBACK(+[](WPEView* view, WPEBuffer* buffer, gpointer user_data) {
-                         auto* self = static_cast<InAppWebView*>(user_data);
-                         self->OnWpePlatformBufferRendered(buffer);
-                       }),
-                       this);
-
-  // Get toplevel for size management (need this before setting scale)
-  wpe_toplevel_ = wpe_view_get_toplevel(wpe_view_);
-
-  // WPEDisplayHeadless doesn't track real display scale, so we need to get it from GTK
-  // and manually notify WPE when it changes
-  if (gtk_window_ != nullptr) {
-    // Get initial scale from GTK window (which tracks the actual display scale)
-    int gtk_scale = gtk_widget_get_scale_factor(GTK_WIDGET(gtk_window_));
-    if (gtk_scale > 0 && static_cast<double>(gtk_scale) != scale_factor_) {
-      scale_factor_ = static_cast<double>(gtk_scale);
-      // Notify WPE about the real display scale
-      if (wpe_toplevel_ != nullptr) {
-        wpe_toplevel_scale_changed(wpe_toplevel_, scale_factor_);
-      }
-    }
-
-    // Connect to GTK window's scale-factor changes (triggered for example by Ubuntu display
-    // settings)
-    scale_changed_handler_ = g_signal_connect(
-        gtk_window_, "notify::scale-factor",
-        G_CALLBACK(+[](GObject* object, GParamSpec* pspec, gpointer user_data) {
-          auto* self = static_cast<InAppWebView*>(user_data);
-          auto* widget = GTK_WIDGET(object);
-          int new_scale = gtk_widget_get_scale_factor(widget);
-
-          if (new_scale > 0 && static_cast<double>(new_scale) != self->scale_factor_) {
-            self->scale_factor_ = static_cast<double>(new_scale);
-
-            // Notify WPE about the scale change so it renders at the correct resolution
-            if (self->wpe_toplevel_ != nullptr) {
-              wpe_toplevel_scale_changed(self->wpe_toplevel_, self->scale_factor_);
-            }
-
-            // Notify Flutter that dimensions may have changed
-            if (self->on_frame_available_) {
-              self->on_frame_available_();
-            }
-          }
-        }),
-        this);
-  } else {
-    debugLog("Warning: No GTK window available for scale detection");
-  }
-
-  // Map the view to start rendering
-  wpe_view_map(wpe_view_);
-
-  // Set focus so the view starts rendering and receiving input
-  wpe_view_focus_in(wpe_view_);
-
-  // Resize toplevel (already obtained earlier for scale setup)
-  if (wpe_toplevel_ != nullptr) {
-    wpe_toplevel_resize(wpe_toplevel_, width_, height_);
-  }
-
-  // Apply ITP setting if configured
-  if (params.initialSettings != nullptr) {
-    WebKitNetworkSession* session = webkit_web_view_get_network_session(webview_);
-    if (session != nullptr && params.initialSettings->itpEnabled) {
-      webkit_network_session_set_itp_enabled(session, TRUE);
-    }
-  }
-
-#elif defined(HAVE_WEBKIT_GTK)
+  // WebKitGTK 无需 display/backend 属性，直接创建；
+  // 离屏宿主挂载在 InitGtkHost()（公共初始化之后）完成。
+  // 网络会话模型：GTK 4.1 为 WebContext。
   // === WebKitGTK API ===
   // WebKitGTK 无需 display/backend 属性，直接创建；
   // 离屏宿主挂载在 InitGtkHost()（公共初始化之后）完成。
@@ -869,91 +364,13 @@ void InAppWebView::InitWebView(const InAppWebViewCreationParams& params) {
       return;
     }
 
-    // ITP：WebKitGTK 4.1 无公开 API，宏短路为 no-op（能力差异，见 webkit_include.h）
+    // ITP：WebKitGTK 4.1 无公开 API，显式报错（能力差异）
     if (params.initialSettings != nullptr && params.initialSettings->itpEnabled) {
-      WebKitNetworkSession* session = webkit_web_view_get_network_session(webview_);
-      webkit_network_session_set_itp_enabled(session, TRUE);
+      errorLog("InAppWebView: itpEnabled is not supported on the WebKitGTK backend");
     }
   }
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  // === WPEBackend-FDO API (Legacy) ===
 
-  if (backend_ == nullptr) {
-    errorLog("InAppWebView: Cannot create webview without backend");
-    return;
-  }
-
-  // Check if we're creating a related webview (for multi-window support)
-  if (params.relatedWebView != nullptr) {
-    webview_ = WEBKIT_WEB_VIEW(
-        g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend_, "user-content-manager",
-                     webkit_web_view_get_user_content_manager(params.relatedWebView), "settings",
-                     webkit_web_view_get_settings(params.relatedWebView), "related-view",
-                     params.relatedWebView, nullptr));
-
-    if (webview_ == nullptr) {
-      errorLog("InAppWebView: Failed to create related WebKitWebView");
-      return;
-    }
-  } else {
-    // Create WebKit settings for a standalone webview
-    WebKitSettings* settings = webkit_settings_new();
-
-    // Check if incognito mode is enabled
-    bool useIncognito = params.initialSettings && params.initialSettings->incognito;
-    WebKitNetworkSession* networkSession = nullptr;
-
-    if (useIncognito) {
-      networkSession = webkit_network_session_new_ephemeral();
-      debugLog("InAppWebView: Creating WebView with ephemeral (incognito) network session");
-    }
-
-    // Check if a custom WebKitWebContext is provided
-    WebKitWebContext* webContext = params.webContext;
-
-    if (webContext != nullptr) {
-      debugLog("InAppWebView: Creating WebView with custom WebKitWebContext");
-
-      if (networkSession != nullptr) {
-        webview_ =
-            WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend_, "web-context",
-                                         webContext, "network-session", networkSession, nullptr));
-      } else {
-        webview_ = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend_,
-                                                "web-context", webContext, nullptr));
-      }
-    } else if (networkSession != nullptr) {
-      webview_ = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "backend", backend_,
-                                              "network-session", networkSession, nullptr));
-    } else {
-      webview_ = webkit_web_view_new(backend_);
-    }
-
-    if (webview_ == nullptr) {
-      errorLog("InAppWebView: Failed to create WebKitWebView");
-      if (settings != nullptr) {
-        g_object_unref(settings);
-      }
-      if (networkSession != nullptr) {
-        g_object_unref(networkSession);
-      }
-      return;
-    }
-
-    if (params.initialSettings != nullptr) {
-      WebKitNetworkSession* session = webkit_web_view_get_network_session(webview_);
-      if (session != nullptr && params.initialSettings->itpEnabled) {
-        webkit_network_session_set_itp_enabled(session, TRUE);
-        debugLog("InAppWebView: ITP enabled");
-      }
-    }
-
-    webkit_web_view_set_settings(webview_, settings);
-    g_object_unref(settings);
-  }
-#endif
-
-  // === Common initialization (both APIs) ===
+  // === 公共初始化 ===
 
   WebKitColor bg = {1.0, 1.0, 1.0, 1.0};
   webkit_web_view_set_background_color(webview_, &bg);
@@ -968,13 +385,11 @@ void InAppWebView::InitWebView(const InAppWebViewCreationParams& params) {
     content_blocker_handler_ = std::make_unique<ContentBlockerHandler>(content_manager);
   }
 
-#ifdef HAVE_WEBKIT_GTK
   // WebKitGTK：将 widget 挂载到离屏宿主并 realize，启动渲染管线
   // （browser 嵌入场景由 InAppBrowser 挂到自身窗口，跳过）
   if (!params.hostInBrowserWindow) {
     InitGtkHost();
   }
-#endif
 }
 
 void InAppWebView::RegisterEventHandlers() {
@@ -1041,23 +456,11 @@ void InAppWebView::RegisterEventHandlers() {
                    this);
 
   // Connect to notify::microphone-capture-state signal for onMicrophoneCaptureStateChanged
-  // Available since WPE WebKit 2.34
   g_signal_connect(webview_, "notify::microphone-capture-state",
                    G_CALLBACK(OnNotifyMicrophoneCaptureState), this);
 
-#ifdef HAVE_WEBKIT_GTK
-  // WebKitGTK 无 per-frame 回调（WPE 专属 API）：
-  // 帧驱动改为节拍器（StartSnapshotTicker），snapshot_pending_ 防重入天然节流
-  StartSnapshotTicker();
-#else
-  webkit_web_view_add_frame_displayed_callback(
-      webview_,
-      [](WebKitWebView*, gpointer data) {
-        auto* self = static_cast<InAppWebView*>(data);
-        self->OnFrameDisplayed(data);
-      },
-      this, nullptr);
-#endif
+  // GPU 直通帧驱动为 XDamage（webkit_gpu_capture 内部），纹理注册后由
+  // AttachGpuCaptureOutput 接线产帧；此处无需额外帧源。
 }
 
 void InAppWebView::PrepareAndAddUserScripts() {
@@ -1173,411 +576,6 @@ void InAppWebView::PrepareAndAddUserScripts() {
   for (const auto& userScript : initial_user_scripts_) {
     user_content_controller_->addUserScript(userScript);
   }
-}
-
-// === Monitor Change Handlers ===
-
-void InAppWebView::SetupMonitorChangeHandlers() {
-  if (registrar_ == nullptr) {
-    return;
-  }
-
-  // Get the GdkDisplay to connect to monitors-changed signal
-  GdkDisplay* display = gdk_display_get_default();
-  if (display != nullptr) {
-    // Connect to monitors-changed signal on the display
-    // This fires when monitors are added, removed, or their properties change
-    monitors_changed_handler_id_ = g_signal_connect(
-        display, "monitor-added", G_CALLBACK(+[](GdkDisplay*, GdkMonitor*, gpointer user_data) {
-          auto* self = static_cast<InAppWebView*>(user_data);
-          self->UpdateMonitorRefreshRate();
-        }),
-        this);
-
-    // Also connect to monitor-removed in case the window moves to another monitor
-    g_signal_connect(display, "monitor-removed",
-                     G_CALLBACK(+[](GdkDisplay*, GdkMonitor*, gpointer user_data) {
-                       auto* self = static_cast<InAppWebView*>(user_data);
-                       self->UpdateMonitorRefreshRate();
-                     }),
-                     this);
-  }
-
-  // Connect to configure-event on the toplevel window to detect window moves/resizes
-  // This helps us detect when the window moves between monitors
-  if (gtk_window_ != nullptr) {
-    configure_event_handler_id_ = g_signal_connect(
-        gtk_window_, "configure-event",
-        G_CALLBACK(+[](GtkWidget*, GdkEventConfigure*, gpointer user_data) -> gboolean {
-          auto* self = static_cast<InAppWebView*>(user_data);
-          self->UpdateMonitorRefreshRate();
-          return FALSE;  // Continue event propagation
-        }),
-        this);
-  }
-}
-
-void InAppWebView::CleanupMonitorChangeHandlers() {
-  // Disconnect monitors-changed signal
-  if (monitors_changed_handler_id_ != 0) {
-    GdkDisplay* display = gdk_display_get_default();
-    if (display != nullptr) {
-      g_signal_handler_disconnect(display, monitors_changed_handler_id_);
-    }
-    monitors_changed_handler_id_ = 0;
-  }
-
-  // Disconnect configure-event signal
-  if (configure_event_handler_id_ != 0 && gtk_window_ != nullptr) {
-    g_signal_handler_disconnect(gtk_window_, configure_event_handler_id_);
-    configure_event_handler_id_ = 0;
-  }
-}
-
-void InAppWebView::UpdateMonitorRefreshRate() {
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (gtk_window_ == nullptr || wpe_backend_ == nullptr) {
-    return;
-  }
-
-  int refresh_rate_mhz =
-      flutter_inappwebview_linux_plugin_get_monitor_refresh_rate_for_window(gtk_window_);
-  if (refresh_rate_mhz > 0) {
-    uint32_t new_rate = static_cast<uint32_t>(refresh_rate_mhz);
-    // Only update if the rate has actually changed
-    if (new_rate != target_refresh_rate_) {
-      wpe_view_backend_set_target_refresh_rate(wpe_backend_, new_rate);
-      target_refresh_rate_ = new_rate;
-    }
-  }
-#endif
-}
-
-// === WPE Backend Callbacks ===
-
-void InAppWebView::OnFrameDisplayed(void* data) {
-  auto* self = static_cast<InAppWebView*>(data);
-
-#ifdef HAVE_WEBKIT_GTK
-  // WebKitGTK：以"帧渲染完成"为驱动源发起 snapshot；
-  // DeliverSnapshot 完成后再通知 Flutter，避免重复上送旧帧
-  self->RequestSnapshot();
-#else
-  if (self->on_frame_available_) {
-    self->on_frame_available_();
-  }
-#endif
-}
-
-#ifdef HAVE_WPE_BACKEND_LEGACY
-void InAppWebView::OnExportDmaBuf(::wpe_fdo_egl_exported_image* image) {
-  if (image == nullptr) {
-    return;
-  }
-
-  uint32_t img_width = wpe_fdo_egl_exported_image_get_width(image);
-  uint32_t img_height = wpe_fdo_egl_exported_image_get_height(image);
-
-  // Get the EGL image from the exported image
-  EGLImageKHR egl_image = wpe_fdo_egl_exported_image_get_egl_image(image);
-
-  // Only do pixel readback if:
-  // 1. skip_pixel_readback_ is false (not using zero-copy mode)
-  // 2. egl_display_ is available
-  // 3. We have a valid EGL image
-  if (!skip_pixel_readback_ && egl_image != EGL_NO_IMAGE_KHR && egl_display_ != nullptr) {
-    ReadPixelsFromEglImage(egl_image, img_width, img_height);
-  }
-
-  // Protect exported_image_ access - this method is called from WPE's thread
-  // while GetCurrentEglImage may be called from Flutter's rendering thread
-  {
-    std::lock_guard<std::mutex> lock(exported_image_mutex_);
-
-    // Release previous exported image
-    if (exported_image_ != nullptr && exportable_ != nullptr) {
-      ::wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(exportable_,
-                                                                            exported_image_);
-    }
-
-    exported_image_ = image;
-  }
-
-  // Call on_frame_available BEFORE dispatch_frame_complete
-  // This ensures the EGL image is captured before we signal WPE we're ready for more
-  if (on_frame_available_) {
-    on_frame_available_();
-  }
-
-  // Dispatch frame complete to allow WebKit to render next frame
-  // Note: This is moved AFTER on_frame_available to ensure the EGL image is used first
-  if (exportable_ != nullptr) {
-    wpe_view_backend_exportable_fdo_dispatch_frame_complete(exportable_);
-  }
-}
-#endif
-
-#ifdef HAVE_WPE_PLATFORM
-void InAppWebView::OnWpePlatformBufferRendered(WPEBuffer* buffer) {
-  if (buffer == nullptr) {
-    return;
-  }
-
-  // Don't process buffers during destruction
-  if (is_disposing_.load()) {
-    // Still need to release the buffer back to WPE
-    if (wpe_view_ != nullptr) {
-      wpe_view_buffer_released(wpe_view_, buffer);
-    }
-    return;
-  }
-
-  // Get buffer dimensions
-  uint32_t buf_width = static_cast<uint32_t>(wpe_buffer_get_width(buffer));
-  uint32_t buf_height = static_cast<uint32_t>(wpe_buffer_get_height(buffer));
-
-  WPEBuffer* previous_buffer = nullptr;
-  bool buffer_handled = false;
-
-  // Track EGL import failures to avoid repeated attempts
-  // Static because if EGL fails once, it will likely keep failing (e.g., no GPU)
-  static bool egl_import_failed_permanently = false;
-
-  {
-    std::lock_guard<std::mutex> lock(wpe_buffer_mutex_);
-
-    // Store reference to previous buffer - we'll release it AFTER importing the new one
-    // This ensures the EGL image's backing memory stays valid until we have a new frame
-    previous_buffer = current_buffer_;
-
-    // Destroy previous EGL image if we created one
-    if (current_egl_image_ != nullptr && egl_display_ != nullptr) {
-      static PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR = nullptr;
-      if (eglDestroyImageKHR == nullptr) {
-        eglDestroyImageKHR = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
-      }
-      if (eglDestroyImageKHR != nullptr) {
-        eglDestroyImageKHR(static_cast<EGLDisplay>(egl_display_),
-                           static_cast<EGLImageKHR>(current_egl_image_));
-      }
-      current_egl_image_ = nullptr;
-    }
-
-    // Check buffer type to determine best rendering path
-    bool is_dma_buf = WPE_IS_BUFFER_DMA_BUF(buffer);
-    bool is_shm = WPE_IS_BUFFER_SHM(buffer);
-
-    // === Priority 1: Try EGL image import (zero-copy, best performance) ===
-    // Only attempt EGL for DMA-BUF buffers (SHM buffers cannot be imported via EGL)
-    // Skip if previous EGL attempts failed
-    if (egl_display_ != nullptr && is_dma_buf && !egl_import_failed_permanently) {
-      GError* error = nullptr;
-      void* egl_image = wpe_buffer_import_to_egl_image(buffer, &error);
-
-      if (egl_image != nullptr) {
-        current_egl_image_ = egl_image;
-        current_buffer_width_ = buf_width;
-        current_buffer_height_ = buf_height;
-        buffer_handled = true;
-      } else {
-        // Mark EGL as permanently failed so we don't keep trying
-        // This is common in VMs or software-only environments
-        egl_import_failed_permanently = true;
-        if (error != nullptr) {
-          g_clear_error(&error);
-        }
-      }
-    }
-
-    // === Priority 2: Direct SHM buffer access (no GBM required) ===
-    // WPEBufferSHM provides direct pixel access without requiring GBM device
-    if (!buffer_handled && is_shm) {
-      WPEBufferSHM* shm_buffer = WPE_BUFFER_SHM(buffer);
-      GBytes* data = wpe_buffer_shm_get_data(shm_buffer);
-
-      if (data != nullptr) {
-        guint stride = wpe_buffer_shm_get_stride(shm_buffer);
-        WPEPixelFormat format = wpe_buffer_shm_get_format(shm_buffer);
-
-        gsize size;
-        const uint8_t* pixels = static_cast<const uint8_t*>(g_bytes_get_data(data, &size));
-
-        if (pixels != nullptr && size > 0) {
-          // Store in pixel buffer for software rendering
-          size_t write_idx = write_buffer_index_.load(std::memory_order_relaxed);
-          auto& pixel_buffer = pixel_buffers_[write_idx];
-
-          if (pixel_buffer.data.size() != size) {
-            pixel_buffer.data.resize(size);
-          }
-          memcpy(pixel_buffer.data.data(), pixels, size);
-
-          // WPE SHM buffers use ARGB8888 format (BGRA in memory on little-endian)
-          // Flutter expects RGBA8888, so we need to convert
-          // ConvertARGB32ToRGBA handles the BGRA -> RGBA conversion
-          if (format == WPE_PIXEL_FORMAT_ARGB8888) {
-            ConvertARGB32ToRGBA(pixel_buffer.data.data(),  // source (in-place)
-                                pixel_buffer.data.data(),  // destination (in-place)
-                                buf_width, buf_height, stride);
-          }
-
-          pixel_buffer.width = buf_width;
-          pixel_buffer.height = buf_height;
-
-          // Swap buffers
-          {
-            std::lock_guard<std::mutex> swap_lock(buffer_swap_mutex_);
-            read_buffer_index_.store(write_idx, std::memory_order_release);
-            write_buffer_index_.store((write_idx + 1) % kNumBuffers, std::memory_order_relaxed);
-          }
-
-          current_buffer_width_ = buf_width;
-          current_buffer_height_ = buf_height;
-          buffer_handled = true;
-        }
-        // Note: Don't unref data - it's borrowed from the buffer
-      }
-    }
-
-    // === Priority 3: Generic pixel import (works for DMA-BUF with GBM device) ===
-    // This is a fallback for DMA-BUF when EGL failed but GBM device is available
-    if (!buffer_handled) {
-      GError* error = nullptr;
-      GBytes* pixels = wpe_buffer_import_to_pixels(buffer, &error);
-      if (pixels != nullptr) {
-        gsize size;
-        const uint8_t* data = static_cast<const uint8_t*>(g_bytes_get_data(pixels, &size));
-
-        // Store in pixel buffer for software rendering
-        size_t write_idx = write_buffer_index_.load(std::memory_order_relaxed);
-        auto& pixel_buffer = pixel_buffers_[write_idx];
-
-        if (pixel_buffer.data.size() != size) {
-          pixel_buffer.data.resize(size);
-        }
-        memcpy(pixel_buffer.data.data(), data, size);
-
-        // GBM pixel import also returns ARGB8888, convert to RGBA
-        uint32_t stride = buf_width * 4;
-        ConvertARGB32ToRGBA(pixel_buffer.data.data(), pixel_buffer.data.data(), buf_width,
-                            buf_height, stride);
-
-        pixel_buffer.width = buf_width;
-        pixel_buffer.height = buf_height;
-
-        // Swap buffers
-        {
-          std::lock_guard<std::mutex> swap_lock(buffer_swap_mutex_);
-          read_buffer_index_.store(write_idx, std::memory_order_release);
-          write_buffer_index_.store((write_idx + 1) % kNumBuffers, std::memory_order_relaxed);
-        }
-
-        g_bytes_unref(pixels);
-        current_buffer_width_ = buf_width;
-        current_buffer_height_ = buf_height;
-        buffer_handled = true;
-      } else {
-        if (error != nullptr) {
-          g_clear_error(&error);
-        }
-      }
-    }
-
-    if (!buffer_handled) {
-      debugLog("ERROR: No rendering method succeeded!");
-    }
-
-    // Store reference to current buffer - we keep it until the NEXT frame arrives
-    // This ensures the EGL image's backing DMA-BUF memory stays valid
-    current_buffer_ = buffer;
-  }
-
-  // Release the PREVIOUS buffer now that we have a new one
-  // The previous EGL image has been destroyed and we have a new frame,
-  // so it's safe to let WPE reuse the old buffer's memory
-  if (previous_buffer != nullptr && wpe_view_ != nullptr && WPE_IS_BUFFER(previous_buffer)) {
-    wpe_view_buffer_released(wpe_view_, previous_buffer);
-  }
-
-  if (buffer_handled && on_frame_available_) {
-    on_frame_available_();
-  }
-}
-#endif
-
-void InAppWebView::ReadPixelsFromEglImage(void* egl_image, uint32_t width, uint32_t height) {
-  // CRITICAL: Check for GL context before any GL operations
-  // WPE WebKit calls this from its own thread which may not have a GL context
-  if (!HasCurrentGLContext()) {
-    return;
-  }
-
-  EGLDisplay display = static_cast<EGLDisplay>(egl_display_);
-  EGLImageKHR image = static_cast<EGLImageKHR>(egl_image);
-
-  if (display == EGL_NO_DISPLAY || image == EGL_NO_IMAGE_KHR) {
-    return;
-  }
-
-  // Create texture from EGL image if we haven't already
-  if (readback_texture_ == 0) {
-    glGenTextures(1, &readback_texture_);
-  }
-
-  // Create FBO if needed
-  if (fbo_ == 0) {
-    glGenFramebuffers(1, &fbo_);
-  }
-
-  glBindTexture(GL_TEXTURE_2D, readback_texture_);
-
-  // Use the OES_EGL_image extension to create texture from EGL image
-  static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES = nullptr;
-  if (glEGLImageTargetTexture2DOES == nullptr) {
-    glEGLImageTargetTexture2DOES =
-        (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
-  }
-
-  if (glEGLImageTargetTexture2DOES != nullptr) {
-    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
-  } else {
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return;
-  }
-
-  glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, readback_texture_, 0);
-
-  GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-  if (status != GL_FRAMEBUFFER_COMPLETE) {
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    return;
-  }
-
-  size_t buffer_size = width * height * 4;  // RGBA
-
-  // Use triple buffering
-  size_t write_idx = write_buffer_index_.load(std::memory_order_relaxed);
-  auto& buffer = pixel_buffers_[write_idx];
-
-  if (buffer.data.size() != buffer_size) {
-    buffer.data.resize(buffer_size);
-  }
-
-  buffer.width = width;
-  buffer.height = height;
-
-  glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, buffer.data.data());
-
-  {
-    std::lock_guard<std::mutex> lock(buffer_swap_mutex_);
-    read_buffer_index_.store(write_idx, std::memory_order_release);
-    write_buffer_index_.store((write_idx + 1) % kNumBuffers, std::memory_order_relaxed);
-  }
-
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 // === Navigation Methods ===
@@ -2500,70 +1498,34 @@ void InAppWebView::getHtml(std::function<void(const std::optional<std::string>&)
 
 // === Screenshot ===
 
-void InAppWebView::takeScreenshot(
-    std::function<void(const std::optional<std::vector<uint8_t>>&)> callback) {
-  if (webview_ == nullptr || callback == nullptr) {
-    if (callback) {
-      callback(std::nullopt);
+namespace {
+
+// takeScreenshot 异步上下文：快照回调跨主循环轮次，需把 callback 带过去
+struct ScreenshotContext {
+  std::function<void(const std::optional<std::vector<uint8_t>>&)> callback;
+};
+
+void OnScreenshotReady(GObject* source_object, GAsyncResult* result, gpointer user_data) {
+  auto* ctx = static_cast<ScreenshotContext*>(user_data);
+
+  GError* error = nullptr;
+  cairo_surface_t* surface =
+      webkit_web_view_get_snapshot_finish(WEBKIT_WEB_VIEW(source_object), result, &error);
+  if (error != nullptr || surface == nullptr) {
+    errorLog(std::string("InAppWebView: takeScreenshot failed: ") +
+             (error != nullptr && error->message != nullptr ? error->message : "unknown"));
+    if (error != nullptr) {
+      g_error_free(error);
     }
+    if (ctx->callback) {
+      ctx->callback(std::nullopt);
+    }
+    delete ctx;
     return;
   }
 
-  // Get the current pixel buffer dimensions
-  uint32_t width = 0;
-  uint32_t height = 0;
-  size_t buffer_size = GetPixelBufferSize(&width, &height);
-
-  if (buffer_size == 0 || width == 0 || height == 0) {
-    callback(std::nullopt);
-    return;
-  }
-
-  // Allocate a temporary buffer for the pixel data
-  std::vector<uint8_t> pixel_data(buffer_size);
-
-  if (!CopyPixelBufferTo(pixel_data.data(), buffer_size, &width, &height)) {
-    callback(std::nullopt);
-    return;
-  }
-
-  // Create a Cairo surface from the RGBA pixel data
-  // Note: WPE provides RGBA data, but Cairo uses ARGB (pre-multiplied alpha in native byte order)
-  // We need to convert RGBA -> ARGB32 format
-
-  // Allocate buffer for Cairo ARGB32 format (same size)
-  std::vector<uint8_t> argb_data(width * height * 4);
-
-  // Convert RGBA -> ARGB32 (Cairo's native format)
-  // Cairo ARGB32 format on little-endian: BGRA in memory
-  for (uint32_t i = 0; i < width * height; ++i) {
-    uint8_t r = pixel_data[i * 4 + 0];
-    uint8_t g = pixel_data[i * 4 + 1];
-    uint8_t b = pixel_data[i * 4 + 2];
-    uint8_t a = pixel_data[i * 4 + 3];
-
-    // Cairo ARGB32 on little-endian = BGRA in memory
-    argb_data[i * 4 + 0] = b;
-    argb_data[i * 4 + 1] = g;
-    argb_data[i * 4 + 2] = r;
-    argb_data[i * 4 + 3] = a;
-  }
-
-  // Create Cairo surface from the ARGB data
-  cairo_surface_t* surface = cairo_image_surface_create_for_data(
-      argb_data.data(), CAIRO_FORMAT_ARGB32, static_cast<int>(width), static_cast<int>(height),
-      static_cast<int>(width * 4)  // stride
-  );
-
-  if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
-    cairo_surface_destroy(surface);
-    callback(std::nullopt);
-    return;
-  }
-
-  // Write PNG to a memory buffer using cairo_surface_write_to_png_stream
+  // 快照 surface 即 cairo ARGB32，直接编码 PNG
   std::vector<uint8_t> png_data;
-
   cairo_status_t status = cairo_surface_write_to_png_stream(
       surface,
       [](void* closure, const unsigned char* data, unsigned int length) -> cairo_status_t {
@@ -2576,11 +1538,32 @@ void InAppWebView::takeScreenshot(
   cairo_surface_destroy(surface);
 
   if (status != CAIRO_STATUS_SUCCESS || png_data.empty()) {
+    if (ctx->callback) {
+      ctx->callback(std::nullopt);
+    }
+    delete ctx;
+    return;
+  }
+
+  if (ctx->callback) {
+    ctx->callback(png_data);
+  }
+  delete ctx;
+}
+
+}  // namespace
+
+void InAppWebView::takeScreenshot(
+    std::function<void(const std::optional<std::vector<uint8_t>>&)> callback) {
+  if (webview_ == nullptr || callback == nullptr) {
     callback(std::nullopt);
     return;
   }
 
-  callback(png_data);
+  // 直接走 WebKit 快照 API（异步，可见区域），与纹理管线解耦，GPU 直通下同样可用。
+  auto* ctx = new ScreenshotContext{std::move(callback)};
+  webkit_web_view_get_snapshot(webview_, WEBKIT_SNAPSHOT_REGION_VISIBLE,
+                               WEBKIT_SNAPSHOT_OPTIONS_NONE, nullptr, OnScreenshotReady, ctx);
 }
 
 // === Session State ===
@@ -2825,12 +1808,6 @@ void InAppWebView::setSettings(const std::shared_ptr<InAppWebViewSettings> newSe
 
     settings_ = newSettings;
     settings_->applyToWebView(webview_);
-#ifdef HAVE_WPE_PLATFORM
-    // Apply WPE Platform settings (dark mode, font settings, etc.)
-    if (wpe_display_ != nullptr) {
-      settings_->applyWpePlatformSettings(wpe_display_);
-    }
-#endif
   }
 }
 
@@ -2846,49 +1823,25 @@ void InAppWebView::setSize(int width, int height) {
   width_ = width;
   height_ = height;
 
-  // Resize the WPE backend
-#ifdef HAVE_WPE_PLATFORM
-  if (wpe_toplevel_ != nullptr) {
-    wpe_toplevel_resize(wpe_toplevel_, width_, height_);
-  }
-#elif defined(HAVE_WEBKIT_GTK)
   if (gtk_host_window_ != nullptr) {
-    // 两种宿主走不同 resize 路径（单写入者原则）：
-    //  - GtkOffscreenWindow（snapshot）：无 X 窗口语义，依赖 GTK 机器 +
-    //    手动 size_allocate（见 InitGtkHost RCA 注释）。
-    //  - GTK_WINDOW_POPUP（GPU 直通）：有真实 X 窗口，走 gdk 直接写入。
-    const bool offscreen_host = GTK_IS_OFFSCREEN_WINDOW(gtk_host_window_) != FALSE;
-    if (offscreen_host) {
-      gtk_window_resize(gtk_host_window_, width_, height_);
-    }
-    // 直接分配宿主窗口本身（GtkBin 正常传导链路）。对 webview widget 手动
-    // size_allocate 会被 GTK 主循环用宿主 1x1 allocation 覆盖（见 InitGtkHost
-    // 注释中的 RCA），导致 snapshot 出图退化为 1x1。
+    // 宿主为 override-redirect 的 GTK_WINDOW_POPUP（GPU 直通，唯一宿主类型）。
+    // 直接分配宿主窗口本身（GtkBin 正常传导链路），并把几何写入 X 服务端。
     GtkAllocation win_alloc = {0, 0, width_, height_};
     gtk_widget_size_allocate(GTK_WIDGET(gtk_host_window_), &win_alloc);
-    if (!offscreen_host) {
-      // GPU 直通：宿主 X 窗口必须与 webview 子窗口同步 resize，否则 X11 子窗口
-      // 渲染被祖先裁剪（实证：宿主卡旧尺寸时内容被裁切 + 未初始化显存噪声；
-      // 外部把宿主改到新尺寸后画面立即痊愈，且 WebKit 早已按新尺寸重排完毕，
-      // 纯裁剪问题）。gtk_window_resize 依赖 GTK 异步 size 机器，与上面的手动
-      // size_allocate 存在竞态——GTK 见 allocation 已等于请求值会跳过
-      // XResizeWindow，宿主卡在旧尺寸（交互式连续 resize 时必现）。直接对
-      // GdkWindow 下发 move_resize 确定生效（单一写入者，避免 GTK 把陈旧
-      // default_size 又拍回去），并顺带重钉屏外定位（尺寸变大时右下角可能
-      // 进入屏幕）。
-      GdkWindow* host_gdk = gtk_widget_get_window(GTK_WIDGET(gtk_host_window_));
-      if (host_gdk != nullptr) {
-        gdk_window_move_resize(host_gdk, -(2 * width_ + 256), -(2 * height_ + 256), width_,
-                               height_);
-      }
+    // 宿主 X 窗口必须与 webview 子窗口同步 resize，否则 X11 子窗口渲染被祖先
+    // 裁剪（实证：宿主卡旧尺寸时内容被裁切 + 未初始化显存噪声；外部把宿主改到
+    // 新尺寸后画面立即痊愈，且 WebKit 早已按新尺寸重排完毕，纯裁剪问题）。
+    // gtk_window_resize 依赖 GTK 异步 size 机器，与手动 size_allocate 存在竞态
+    // ——GTK 见 allocation 已等于请求值会跳过 XResizeWindow，宿主卡在旧尺寸
+    // （交互式连续 resize 时必现）。直接对 GdkWindow 下发 move_resize 确定生效
+    // （单一写入者），并顺带重钉屏外定位（尺寸变大时右下角可能进入屏幕）。
+    GdkWindow* host_gdk = gtk_widget_get_window(GTK_WIDGET(gtk_host_window_));
+    if (host_gdk != nullptr) {
+      gdk_window_move_resize(host_gdk, -(2 * width_ + 256), -(2 * height_ + 256), width_, height_);
     }
   }
+  // resize 后强制补帧（重取当前内容别名并入队）
   RequestSnapshot();
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  if (wpe_backend_ != nullptr) {
-    wpe_view_backend_dispatch_set_size(wpe_backend_, width_, height_);
-  }
-#endif
 }
 
 void InAppWebView::setScaleFactor(double scale_factor) {
@@ -2896,23 +1849,9 @@ void InAppWebView::setScaleFactor(double scale_factor) {
     return;
   scale_factor_ = scale_factor;
 
-  // WPE uses device scale factor
-#ifdef HAVE_WPE_PLATFORM
-  // WPEPlatform: Notify the toplevel about scale changes
-  // This is needed for proper HiDPI rendering when scale changes dynamically
-  if (wpe_toplevel_ != nullptr) {
-    wpe_toplevel_scale_changed(wpe_toplevel_, scale_factor_);
-  }
-#elif defined(HAVE_WEBKIT_GTK)
   // WebKitGTK：notify::scale-factor 监听（InitGtkHost）负责同步 scale_factor_，
-  // 此处仅需触发一次重快照
+  // 此处仅需触发一次强制补帧
   RequestSnapshot();
-#endif
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (wpe_backend_ != nullptr) {
-    wpe_view_backend_dispatch_set_device_scale_factor(wpe_backend_, scale_factor_);
-  }
-#endif
 }
 
 // === Activity State Management (like Cog browser) ===
@@ -2927,34 +1866,10 @@ void InAppWebView::setFocused(bool focused) {
     HideAllPopups();
   }
 
-#ifdef HAVE_WPE_PLATFORM
-  // WPEPlatform: Use wpe_view_focus_in/out API
-  if (wpe_view_ != nullptr) {
-    if (focused) {
-      wpe_view_focus_in(wpe_view_);
-    } else {
-      wpe_view_focus_out(wpe_view_);
-    }
-  }
-#elif defined(HAVE_WEBKIT_GTK)
   if (webview_ != nullptr && focused) {
     gtk_widget_grab_focus(GTK_WIDGET(webview_));
   }
   // 失焦：GTK 无显式 unfocus API，焦点由宿主窗口焦点流处理
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  if (wpe_backend_ != nullptr) {
-    if (focused) {
-      // Add focused state - also ensure visible and in_window are set
-      wpe_view_backend_add_activity_state(wpe_backend_, wpe_view_activity_state_focused);
-      wpe_view_backend_add_activity_state(wpe_backend_, wpe_view_activity_state_visible);
-      wpe_view_backend_add_activity_state(wpe_backend_, wpe_view_activity_state_in_window);
-    } else {
-      // Remove only the focused state, keep visible and in_window so the webview
-      // continues to render and process basic events
-      wpe_view_backend_remove_activity_state(wpe_backend_, wpe_view_activity_state_focused);
-    }
-  }
-#endif
 }
 
 void InAppWebView::setVisible(bool visible) {
@@ -2962,156 +1877,60 @@ void InAppWebView::setVisible(bool visible) {
     return;
   is_visible_ = visible;
 
-#ifdef HAVE_WPE_PLATFORM
-  // WPEPlatform: Use wpe_view_set_visible and map/unmap
-  if (wpe_view_ != nullptr) {
-    wpe_view_set_visible(wpe_view_, visible);
-    if (visible) {
-      wpe_view_map(wpe_view_);
-    } else {
-      wpe_view_unmap(wpe_view_);
-    }
-  }
-#elif defined(HAVE_WEBKIT_GTK)
-  // 离屏宿主常显，is_visible_ 状态已缓存；可见性不影响 snapshot 管线
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  if (wpe_backend_ != nullptr) {
-    if (visible) {
-      wpe_view_backend_add_activity_state(wpe_backend_, wpe_view_activity_state_visible);
-      wpe_view_backend_add_activity_state(wpe_backend_, wpe_view_activity_state_in_window);
-    } else {
-      wpe_view_backend_remove_activity_state(wpe_backend_, wpe_view_activity_state_visible);
-      wpe_view_backend_remove_activity_state(wpe_backend_, wpe_view_activity_state_in_window);
-    }
-  }
-#endif
+  // 离屏宿主常显，is_visible_ 状态已缓存；可见性不影响 GPU 直通管线（页面
+  // 渲染由 WebKit 进程独立驱动）。
 }
 
 uint32_t InAppWebView::getActivityState() const {
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (wpe_backend_ != nullptr) {
-    return wpe_view_backend_get_activity_state(wpe_backend_);
-  }
-#endif
-  // WPEPlatform doesn't expose activity state in the same way
+  // activity state 为 WPE backend 概念，WebKitGTK 无对应 API
   return 0;
 }
 
 // === Refresh Rate Management ===
 
 void InAppWebView::setTargetRefreshRate(uint32_t rate) {
+  // WebKitGTK 无刷新率协商 API（帧率由合成器与页面实际变化率决定），
+  // 仅缓存通道参数。
   target_refresh_rate_ = rate;
-#ifdef HAVE_WPE_PLATFORM
-  if (wpe_view_ != nullptr) {
-    WPEScreen* screen = wpe_view_get_screen(wpe_view_);
-    if (screen != nullptr) {
-      wpe_screen_set_refresh_rate(screen, static_cast<int>(rate));
-    }
-  }
-#endif
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (wpe_backend_ != nullptr) {
-    wpe_view_backend_set_target_refresh_rate(wpe_backend_, rate);
-  }
-#endif
 }
 
 uint32_t InAppWebView::getTargetRefreshRate() const {
-#ifdef HAVE_WPE_PLATFORM
-  if (wpe_view_ != nullptr) {
-    WPEScreen* screen = wpe_view_get_screen(wpe_view_);
-    if (screen != nullptr) {
-      int refreshRate = wpe_screen_get_refresh_rate(screen);
-      if (refreshRate > 0) {
-        return static_cast<uint32_t>(refreshRate);
-      }
-    }
-  }
-#endif
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (wpe_backend_ != nullptr) {
-    return wpe_view_backend_get_target_refresh_rate(wpe_backend_);
-  }
-#endif
   return target_refresh_rate_;
 }
 
 // === Screen Scale Management ===
 
 double InAppWebView::getScreenScale() const {
-#ifdef HAVE_WPE_PLATFORM
-  if (wpe_view_ != nullptr) {
-    WPEScreen* screen = wpe_view_get_screen(wpe_view_);
-    if (screen != nullptr) {
-      return wpe_screen_get_scale(screen);
-    }
-  }
-#endif
-  // Legacy backend doesn't have screen scale API
-  return 1.0;
+  // GTK 侧 scale_factor_ 由 notify::scale-factor 监听维护
+  return scale_factor_;
 }
 
 void InAppWebView::setScreenScale(double scale) {
-#ifdef HAVE_WPE_PLATFORM
-  if (wpe_view_ != nullptr) {
-    WPEScreen* screen = wpe_view_get_screen(wpe_view_);
-    if (screen != nullptr) {
-      wpe_screen_set_scale(screen, scale);
-    }
-  }
-#endif
-  // Legacy backend doesn't have screen scale API
+  (void)scale;
+  // WebKitGTK 无外部设置屏幕缩放的 API，notify::scale-factor 为主同步源
 }
 
 // === Visibility Management ===
 
 bool InAppWebView::isVisible() const {
-#ifdef HAVE_WPE_PLATFORM
-  if (wpe_view_ != nullptr) {
-    return wpe_view_get_visible(wpe_view_);
-  }
-#endif
-  // Legacy backend: return cached visibility state
   return is_visible_;
 }
 
 // === Fullscreen Control ===
 
 void InAppWebView::requestEnterFullscreen() {
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (wpe_backend_ != nullptr) {
-    wpe_view_backend_dispatch_request_enter_fullscreen(wpe_backend_);
-  }
-#endif
-  // Note: WPEPlatform uses WebKit enter-fullscreen/leave-fullscreen signals
+  // WebKitGTK 走 enter-fullscreen/leave-fullscreen 信号（RegisterEventHandlers）
 }
 
 void InAppWebView::requestExitFullscreen() {
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (wpe_backend_ != nullptr) {
-    wpe_view_backend_dispatch_request_exit_fullscreen(wpe_backend_);
-  }
-#endif
-  // Note: WPEPlatform uses WebKit enter-fullscreen/leave-fullscreen signals
+  // WebKitGTK 走 enter-fullscreen/leave-fullscreen 信号（RegisterEventHandlers）
 }
 
 // === Pointer Lock Support (for games/immersive apps) ===
 
 void InAppWebView::setPointerLockHandler(std::function<bool(bool)> handler) {
   pointer_lock_handler_ = std::move(handler);
-
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (wpe_backend_ != nullptr) {
-    wpe_view_backend_set_pointer_lock_handler(
-        wpe_backend_,
-        [](void* data, bool lock) -> bool {
-          auto* self = static_cast<InAppWebView*>(data);
-          return self->OnPointerLockRequest(lock);
-        },
-        this);
-  }
-#endif
-  // Note: WPEPlatform uses wpe_view_lock_pointer/unlock_pointer APIs
+  // WebKitGTK 无公开指针锁定 API，handler 仅作上层协商缓存
 }
 
 bool InAppWebView::OnPointerLockRequest(bool lock) {
@@ -3128,44 +1947,12 @@ bool InAppWebView::OnPointerLockRequest(bool lock) {
 }
 
 bool InAppWebView::requestPointerLock() {
-#ifdef HAVE_WPE_PLATFORM
-  if (wpe_view_ != nullptr) {
-    bool result = wpe_view_lock_pointer(wpe_view_);
-    if (result) {
-      pointer_locked_ = true;
-    }
-    return result;
-  }
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  if (wpe_backend_ != nullptr) {
-    bool result = wpe_view_backend_request_pointer_lock(wpe_backend_);
-    if (result) {
-      pointer_locked_ = true;
-    }
-    return result;
-  }
-#endif
+  // WebKitGTK 无公开指针锁定 API，显式返回 false（不做静默伪装）
   return false;
 }
 
 bool InAppWebView::requestPointerUnlock() {
-#ifdef HAVE_WPE_PLATFORM
-  if (wpe_view_ != nullptr) {
-    bool result = wpe_view_unlock_pointer(wpe_view_);
-    if (result) {
-      pointer_locked_ = false;
-    }
-    return result;
-  }
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  if (wpe_backend_ != nullptr) {
-    bool result = wpe_view_backend_request_pointer_unlock(wpe_backend_);
-    if (result) {
-      pointer_locked_ = false;
-    }
-    return result;
-  }
-#endif
+  // WebKitGTK 无公开指针锁定 API，显式返回 false（不做静默伪装）
   return false;
 }
 
@@ -3184,15 +1971,6 @@ bool InAppWebView::OnDomFullscreenRequest(bool fullscreen) {
     // Already in the requested state - dispatch the event immediately
     // This handles cases where DOM fullscreen requests are mixed with
     // system fullscreen commands
-#ifdef HAVE_WPE_BACKEND_LEGACY
-    if (wpe_backend_ != nullptr) {
-      if (is_fullscreen_) {
-        wpe_view_backend_dispatch_did_enter_fullscreen(wpe_backend_);
-      } else {
-        wpe_view_backend_dispatch_did_exit_fullscreen(wpe_backend_);
-      }
-    }
-#endif
     return true;
   }
 
@@ -3208,17 +1986,6 @@ bool InAppWebView::OnDomFullscreenRequest(bool fullscreen) {
       channel_delegate_->onExitFullscreen();
     }
   }
-
-  // Dispatch the fullscreen state to WPE
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (wpe_backend_ != nullptr) {
-    if (fullscreen) {
-      wpe_view_backend_dispatch_did_enter_fullscreen(wpe_backend_);
-    } else {
-      wpe_view_backend_dispatch_did_exit_fullscreen(wpe_backend_);
-    }
-  }
-#endif
 
   waiting_fullscreen_notify_ = false;
 
@@ -3237,38 +2004,7 @@ void InAppWebView::SetCursorPos(double x, double y) {
   cursor_x_ = x;
   cursor_y_ = y;
 
-#ifdef HAVE_WPE_PLATFORM
-  // Send pointer motion event using WPEPlatform API
-  if (wpe_view_ != nullptr) {
-    // Include button_state_ in modifiers so dragging (text selection) works correctly
-    WPEModifiers modifiers = static_cast<WPEModifiers>(current_modifiers_ | button_state_);
-    WPEEvent* event =
-        wpe_event_pointer_move_new(WPE_EVENT_POINTER_MOVE, wpe_view_, WPE_INPUT_SOURCE_MOUSE,
-                                   static_cast<guint32>(g_get_monotonic_time() / 1000), modifiers,
-                                   x,  // Scale to physical pixels
-                                   y,
-                                   0.0,  // delta_x (no delta for absolute position)
-                                   0.0   // delta_y
-        );
-    wpe_view_event(wpe_view_, event);
-    wpe_event_unref(event);
-  }
-#elif defined(HAVE_WEBKIT_GTK)
   GtkSetCursorPos(x, y);
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  // Send pointer motion event with scaled coordinates (logical -> physical)
-  if (wpe_backend_ != nullptr) {
-    struct wpe_input_pointer_event event = {};
-    event.type = wpe_input_pointer_event_type_motion;
-    event.time = g_get_monotonic_time() / 1000;  // Convert to milliseconds
-    // Scale coordinates from logical to physical pixels
-    event.x = static_cast<int>(x * scale_factor_);
-    event.y = static_cast<int>(y * scale_factor_);
-    event.state = 0;  // No button state change for motion events
-    event.modifiers = current_modifiers_ | button_state_;  // Include pressed button modifiers
-    wpe_view_backend_dispatch_pointer_event(wpe_backend_, &event);
-  }
-#endif
 }
 
 void InAppWebView::SetPointerButton(int kind, int button, int clickCount) {
@@ -3277,219 +2013,14 @@ void InAppWebView::SetPointerButton(int kind, int button, int clickCount) {
     HideAllPopups();
   }
 
-#ifdef HAVE_WPE_PLATFORM
-  if (wpe_view_ == nullptr)
-    return;
-
-  // No need to scale coordinates from logical to physical pixels as WPEPlatform handles this
-  // internally.
-  double scaled_x = cursor_x_;
-  double scaled_y = cursor_y_;
-
-  // Map button: Flutter uses 0=none, 1=primary, 2=secondary, 3=tertiary
-  // WPE/GDK uses: 1=Left, 2=Middle, 3=Right
-  guint wpe_button;
-  switch (button) {
-    case 1:
-      wpe_button = 1;
-      break;  // Primary -> Left
-    case 2:
-      wpe_button = 3;
-      break;  // Secondary -> Right (context menu)
-    case 3:
-      wpe_button = 2;
-      break;  // Tertiary -> Middle
-    default:
-      wpe_button = 1;
-      break;  // Default to primary
-  }
-
-  // WPEPlatform button modifier bits: WPE_MODIFIER_POINTER_BUTTON1 = 1 << 8, etc.
-  // Button 1 -> bit 8, Button 2 -> bit 9, Button 3 -> bit 10
-  const uint32_t button_modifier_bit = 1u << (7 + wpe_button);
-
-  guint32 time = static_cast<guint32>(g_get_monotonic_time() / 1000);
-  WPEEventType event_type;
-
-  switch (static_cast<WpePointerEventKind>(kind)) {
-    case WpePointerEventKind::Down:
-      event_type = WPE_EVENT_POINTER_DOWN;
-      // Update button state BEFORE creating the event
-      button_state_ |= button_modifier_bit;
-      break;
-    case WpePointerEventKind::Up:
-      event_type = WPE_EVENT_POINTER_UP;
-      // Update button state AFTER the event (but include in modifiers)
-      break;
-    default:
-      // Ignore enter/leave/cancel etc for button events
-      return;
-  }
-
-  // Include button state in modifiers for proper drag detection
-  WPEModifiers modifiers = static_cast<WPEModifiers>(current_modifiers_ | button_state_);
-
-  // First send a motion event to ensure WebKit has the correct cursor position
-  WPEEvent* motion_event =
-      wpe_event_pointer_move_new(WPE_EVENT_POINTER_MOVE, wpe_view_, WPE_INPUT_SOURCE_MOUSE, time,
-                                 modifiers, scaled_x, scaled_y, 0.0, 0.0);
-  wpe_view_event(wpe_view_, motion_event);
-  wpe_event_unref(motion_event);
-
-  // Send button event
-  // CRITICAL: press_count must be 0 for UP events, only non-zero for DOWN events
-  // (WPEPlatform assertion: !pressCount || type == WPE_EVENT_POINTER_DOWN)
-  guint press_count = (event_type == WPE_EVENT_POINTER_DOWN) ? static_cast<guint>(clickCount) : 0;
-
-  WPEEvent* button_event =
-      wpe_event_pointer_button_new(event_type, wpe_view_, WPE_INPUT_SOURCE_MOUSE, time, modifiers,
-                                   wpe_button, scaled_x, scaled_y, press_count);
-  wpe_view_event(wpe_view_, button_event);
-  wpe_event_unref(button_event);
-
-  // Clear button state AFTER sending the UP event
-  if (event_type == WPE_EVENT_POINTER_UP) {
-    button_state_ &= ~button_modifier_bit;
-  }
-
-#elif defined(HAVE_WEBKIT_GTK)
   GtkSetPointerButton(kind, button, clickCount);
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  if (wpe_backend_ == nullptr)
-    return;
-
-  // Scale coordinates from logical to physical pixels
-  int scaled_x = static_cast<int>(cursor_x_ * scale_factor_);
-  int scaled_y = static_cast<int>(cursor_y_ * scale_factor_);
-
-  // Map button: Flutter uses 0=none, 1=primary, 2=secondary, 3=tertiary
-  // WPE/WebKit uses: 1=Left, 2=Right, 3=Middle (see WebEventFactory.cpp)
-  // This is a 1:1 mapping for Flutter -> WPE
-  uint32_t wpe_button;
-  switch (button) {
-    case 1:
-      wpe_button = 1;
-      break;  // Primary -> Left
-    case 2:
-      wpe_button = 2;
-      break;  // Secondary -> Right (context menu)
-    case 3:
-      wpe_button = 3;
-      break;  // Tertiary -> Middle
-    default:
-      wpe_button = 1;
-      break;  // Default to primary
-  }
-
-  // WPE button modifier bits for tracking pressed buttons in modifiers field
-  // See wpe_input_pointer_modifier_button* in wpe/input.h: button1=1<<20, button2=1<<21,
-  // button3=1<<22
-  const uint32_t button_modifier_bit = 1u << (19 + wpe_button);
-
-  // First send a motion event to ensure WebKit has the correct cursor position
-  // This is important because the button event needs to know where the click occurred
-  {
-    struct wpe_input_pointer_event motion_event = {};
-    motion_event.type = wpe_input_pointer_event_type_motion;
-    motion_event.time = g_get_monotonic_time() / 1000;
-    motion_event.x = scaled_x;
-    motion_event.y = scaled_y;
-    motion_event.button = 0;
-    motion_event.state = 0;
-    motion_event.modifiers = current_modifiers_ | button_state_;
-    wpe_view_backend_dispatch_pointer_event(wpe_backend_, &motion_event);
-  }
-
-  struct wpe_input_pointer_event event = {};
-  event.time = g_get_monotonic_time() / 1000;
-  event.x = scaled_x;
-  event.y = scaled_y;
-  event.button = wpe_button;
-
-  switch (static_cast<WpePointerEventKind>(kind)) {
-    case WpePointerEventKind::Down:
-      event.type = wpe_input_pointer_event_type_button;
-      // state=1 means button is pressed (see WebEventFactory: event->state ? MouseDown : MouseUp)
-      event.state = 1;
-      button_state_ |= button_modifier_bit;
-      event.modifiers = current_modifiers_ | button_state_;
-      break;
-    case WpePointerEventKind::Up:
-      event.type = wpe_input_pointer_event_type_button;
-      // state=0 means button is released
-      event.state = 0;
-      button_state_ &= ~button_modifier_bit;
-      event.modifiers = current_modifiers_ | button_state_;
-      break;
-    default:
-      // Ignore enter/leave/cancel etc for button events
-      return;
-  }
-
-  wpe_view_backend_dispatch_pointer_event(wpe_backend_, &event);
-#endif
 }
 
 void InAppWebView::SetScrollDelta(double dx, double dy) {
   // Hide all popups when scrolling
   HideAllPopups();
 
-#ifdef HAVE_WPE_PLATFORM
-  if (wpe_view_ == nullptr)
-    return;
-
-  // No need to scale coordinates from logical to physical pixels as WPEPlatform handles this
-  // internally.
-  double scaled_x = cursor_x_;
-  double scaled_y = cursor_y_;
-
-  WPEModifiers modifiers = static_cast<WPEModifiers>(current_modifiers_);
-  guint32 time = static_cast<guint32>(g_get_monotonic_time() / 1000);
-
-  // Flutter provides delta in logical pixels.
-  // No need to scale coordinates from logical to physical pixels as WPEPlatform handles this
-  // internally.
-  double delta_x = dx;
-  double delta_y = dy;
-
-  WPEEvent* event =
-      wpe_event_scroll_new(wpe_view_, WPE_INPUT_SOURCE_MOUSE, time, modifiers, delta_x, delta_y,
-                           TRUE,   // precise_deltas - we have exact pixel values
-                           FALSE,  // is_stop - this is not a scroll stop event
-                           scaled_x, scaled_y);
-  wpe_view_event(wpe_view_, event);
-  wpe_event_unref(event);
-
-#elif defined(HAVE_WEBKIT_GTK)
   GtkSetScrollDelta(dx, dy);
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  if (wpe_backend_ == nullptr)
-    return;
-
-  // Scale coordinates from logical to physical pixels
-  int scaled_x = static_cast<int>(cursor_x_ * scale_factor_);
-  int scaled_y = static_cast<int>(cursor_y_ * scale_factor_);
-
-  // Use the 2D axis event with smooth scrolling for proper pixel-based scrolling
-  // The wpe_input_axis_2d_event provides x_axis and y_axis as doubles
-  // With wpe_input_axis_event_type_motion_smooth | wpe_input_axis_event_type_mask_2d,
-  // WebKit will use the raw pixel values for smooth scrolling
-
-  struct wpe_input_axis_2d_event event = {};
-  event.base.type = static_cast<wpe_input_axis_event_type>(wpe_input_axis_event_type_motion_smooth |
-                                                           wpe_input_axis_event_type_mask_2d);
-  event.base.time = g_get_monotonic_time() / 1000;
-  event.base.x = scaled_x;
-  event.base.y = scaled_y;
-  event.base.modifiers = current_modifiers_;
-
-  // Flutter provides delta in logical pixels, scale to physical and apply sensitivity
-  // The scale factor converts logical to physical pixels
-  event.x_axis = dx * scale_factor_;
-  event.y_axis = dy * scale_factor_;
-
-  wpe_view_backend_dispatch_axis_event(wpe_backend_, &event.base);
-#endif
 }
 
 void InAppWebView::SendKeyEvent(int type, int64_t keyCode, int scanCode, int modifiers,
@@ -3535,334 +2066,17 @@ void InAppWebView::SendKeyEvent(int type, int64_t keyCode, int scanCode, int mod
 
   current_modifiers_ = static_cast<uint32_t>(modifiers);
 
-#ifdef HAVE_WEBKIT_GTK
   GtkSendKeyEvent(type, keyCode, scanCode, current_modifiers_);
-  return;
-#elif defined(HAVE_WPE_PLATFORM)
-  if (wpe_view_ == nullptr)
-    return;
-
-  WPEModifiers wpe_modifiers = static_cast<WPEModifiers>(current_modifiers_);
-  guint32 time = static_cast<guint32>(g_get_monotonic_time() / 1000);
-
-  // type: 0=down, 1=up, 2=repeat
-  WPEEventType event_type;
-  switch (type) {
-    case 0:  // down
-    case 2:  // repeat (also treated as key down in WPE)
-      event_type = WPE_EVENT_KEYBOARD_KEY_DOWN;
-      break;
-    case 1:  // up
-      event_type = WPE_EVENT_KEYBOARD_KEY_UP;
-      break;
-    default:
-      return;
-  }
-
-  WPEEvent* event =
-      wpe_event_keyboard_new(event_type, wpe_view_, WPE_INPUT_SOURCE_KEYBOARD, time, wpe_modifiers,
-                             static_cast<guint>(scanCode),  // hardware keycode
-                             static_cast<guint>(keyCode)    // keyval (XKB keysym)
-      );
-  wpe_view_event(wpe_view_, event);
-  wpe_event_unref(event);
-
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  if (wpe_backend_ == nullptr)
-    return;
-
-  struct wpe_input_keyboard_event event = {};
-  event.time = g_get_monotonic_time() / 1000;
-  event.key_code = static_cast<uint32_t>(keyCode);
-  event.hardware_key_code = static_cast<uint32_t>(scanCode);
-  // type: 0=down, 1=up, 2=repeat
-  event.pressed = (type == 0 || type == 2);
-
-  // Modifiers from Dart are already in WPE format:
-  // Control=1, Shift=2, Alt=4, Meta=8
-  event.modifiers = current_modifiers_;
-
-  wpe_view_backend_dispatch_keyboard_event(wpe_backend_, &event);
-#endif
 }
 
 void InAppWebView::SendTouchEvent(
     int type, int id, double x, double y,
     const std::vector<std::tuple<int, double, double, int>>& touchPoints) {
-#ifdef HAVE_WEBKIT_GTK
   GtkSendTouchEvent(type, id, x, y, touchPoints);
-  return;
-#elif defined(HAVE_WPE_PLATFORM)
-  if (wpe_view_ == nullptr)
-    return;
-
-  WPEModifiers modifiers = static_cast<WPEModifiers>(current_modifiers_);
-  guint32 time = static_cast<guint32>(g_get_monotonic_time() / 1000);
-
-  // Map Dart touch event types to WPE types
-  // Dart: 0=down, 1=up, 2=move, 3=cancel
-  WPEEventType event_type;
-  switch (type) {
-    case 0:
-      event_type = WPE_EVENT_TOUCH_DOWN;
-      break;
-    case 1:
-      event_type = WPE_EVENT_TOUCH_UP;
-      break;
-    case 2:
-      event_type = WPE_EVENT_TOUCH_MOVE;
-      break;
-    case 3:
-      event_type = WPE_EVENT_TOUCH_CANCEL;
-      break;
-    default:
-      return;
-  }
-
-  // For WPEPlatform, we send individual touch events for each point.
-  // The main touch point is the one that triggered this event.
-  // No need to scale coordinates from logical to physical pixels as WPEPlatform handles this
-  // internally.
-  double scaled_x = x;
-  double scaled_y = y;
-
-  WPEEvent* event = wpe_event_touch_new(event_type, wpe_view_, WPE_INPUT_SOURCE_TOUCHSCREEN, time,
-                                        modifiers, static_cast<guint32>(id), scaled_x, scaled_y);
-  wpe_view_event(wpe_view_, event);
-  wpe_event_unref(event);
-
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  if (wpe_backend_ == nullptr)
-    return;
-
-  // Map Dart touch event types to WPE types
-  // Dart: 0=down, 1=up, 2=move, 3=cancel
-  // WPE: wpe_input_touch_event_type_down=1, up=3, motion=2
-  enum wpe_input_touch_event_type wpe_type;
-  switch (type) {
-    case 0:
-      wpe_type = wpe_input_touch_event_type_down;
-      break;
-    case 1:
-      wpe_type = wpe_input_touch_event_type_up;
-      break;
-    case 2:
-      wpe_type = wpe_input_touch_event_type_motion;
-      break;
-    default:
-      wpe_type = wpe_input_touch_event_type_null;
-      break;  // cancel
-  }
-
-  // Build the raw touchpoints array
-  std::vector<struct wpe_input_touch_event_raw> raw_points;
-  raw_points.reserve(touchPoints.size());
-
-  for (const auto& point : touchPoints) {
-    struct wpe_input_touch_event_raw raw = {};
-    raw.id = std::get<0>(point);
-    raw.x = static_cast<int32_t>(std::get<1>(point) * scale_factor_);
-    raw.y = static_cast<int32_t>(std::get<2>(point) * scale_factor_);
-
-    // Map point type
-    int pointType = std::get<3>(point);
-    switch (pointType) {
-      case 0:
-        raw.type = wpe_input_touch_event_type_down;
-        break;
-      case 1:
-        raw.type = wpe_input_touch_event_type_up;
-        break;
-      case 2:
-        raw.type = wpe_input_touch_event_type_motion;
-        break;
-      default:
-        raw.type = wpe_input_touch_event_type_null;
-        break;
-    }
-    raw.time = g_get_monotonic_time() / 1000;
-
-    raw_points.push_back(raw);
-  }
-
-  // Build the touch event
-  struct wpe_input_touch_event event = {};
-  event.touchpoints = raw_points.data();
-  event.touchpoints_length = raw_points.size();
-  event.type = wpe_type;
-  event.id = id;
-  event.time = g_get_monotonic_time() / 1000;
-  event.modifiers = current_modifiers_;
-
-  wpe_view_backend_dispatch_touch_event(wpe_backend_, &event);
-#endif
-}
-
-// === Pixel Buffer Access ===
-
-size_t InAppWebView::GetPixelBufferSize(uint32_t* out_width, uint32_t* out_height) const {
-  // With WPE + FDO, we typically use DMA-BUF export instead of CPU copy
-  // This is a fallback for when DMA-BUF is not available
-  std::lock_guard<std::mutex> lock(buffer_swap_mutex_);
-
-  size_t read_idx = read_buffer_index_.load(std::memory_order_acquire);
-  const auto& buffer = pixel_buffers_[read_idx];
-
-  if (out_width)
-    *out_width = static_cast<uint32_t>(buffer.width);
-  if (out_height)
-    *out_height = static_cast<uint32_t>(buffer.height);
-
-  return buffer.data.size();
-}
-
-bool InAppWebView::CopyPixelBufferTo(uint8_t* dst, size_t dst_size, uint32_t* out_width,
-                                     uint32_t* out_height) const {
-  std::lock_guard<std::mutex> lock(buffer_swap_mutex_);
-
-  size_t read_idx = read_buffer_index_.load(std::memory_order_acquire);
-  const auto& buffer = pixel_buffers_[read_idx];
-
-  if (buffer.data.empty() || dst_size < buffer.data.size()) {
-    return false;
-  }
-
-  // Use SIMD-optimized memory copy for better performance
-  FastMemcpy(dst, buffer.data.data(), buffer.data.size());
-
-  if (out_width)
-    *out_width = static_cast<uint32_t>(buffer.width);
-  if (out_height)
-    *out_height = static_cast<uint32_t>(buffer.height);
-
-  return true;
-}
-
-bool InAppWebView::HasDmaBufExport() const {
-#ifdef HAVE_WPE_PLATFORM
-  std::lock_guard<std::mutex> lock(wpe_buffer_mutex_);
-  return current_egl_image_ != nullptr;
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  std::lock_guard<std::mutex> lock(exported_image_mutex_);
-  return exported_image_ != nullptr;
-#else
-  return false;
-#endif
-}
-
-bool InAppWebView::GetDmaBufFd(int* fd, uint32_t* stride, uint32_t* width, uint32_t* height) const {
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  std::lock_guard<std::mutex> lock(exported_image_mutex_);
-  if (exported_image_ == nullptr) {
-    return false;
-  }
-
-  // Get DMA-BUF file descriptor from the exported image
-  // This allows zero-copy sharing with Flutter's texture system
-  // Note: The actual API depends on the WPE version
-  // This is a simplified version
-
-  if (width)
-    *width = static_cast<uint32_t>(width_);
-  if (height)
-    *height = static_cast<uint32_t>(height_);
-
-  // In a real implementation, you'd get the DMA-BUF FD from the EGL image
-  // For now, return false to indicate not implemented
-  return false;
-#else
-  // WPEPlatform uses a different rendering model
-  return false;
-#endif
-}
-
-void* InAppWebView::GetCurrentEglImage(uint32_t* out_width, uint32_t* out_height) const {
-#ifdef HAVE_WPE_PLATFORM
-  // WPEPlatform: Return the EGL image from our buffer-rendered callback
-  std::lock_guard<std::mutex> lock(wpe_buffer_mutex_);
-
-  if (current_egl_image_ == nullptr) {
-    if (out_width)
-      *out_width = 0;
-    if (out_height)
-      *out_height = 0;
-    return nullptr;
-  }
-
-  if (out_width)
-    *out_width = current_buffer_width_;
-  if (out_height)
-    *out_height = current_buffer_height_;
-
-  return current_egl_image_;
-
-#elif defined(HAVE_WPE_BACKEND_LEGACY)
-  // Protect exported_image_ access - OnExportDmaBuf may be called from WPE's thread
-  std::lock_guard<std::mutex> lock(exported_image_mutex_);
-
-  if (exported_image_ == nullptr) {
-    if (out_width)
-      *out_width = 0;
-    if (out_height)
-      *out_height = 0;
-    return nullptr;
-  }
-
-  // Get dimensions from the exported image
-  uint32_t img_width = wpe_fdo_egl_exported_image_get_width(exported_image_);
-  uint32_t img_height = wpe_fdo_egl_exported_image_get_height(exported_image_);
-
-  if (out_width)
-    *out_width = img_width;
-  if (out_height)
-    *out_height = img_height;
-
-  // Return the EGL image handle (EGLImageKHR)
-  return wpe_fdo_egl_exported_image_get_egl_image(exported_image_);
-#else
-  // No backend available
-  if (out_width)
-    *out_width = 0;
-  if (out_height)
-    *out_height = 0;
-  return nullptr;
-#endif
 }
 
 void InAppWebView::SetOnFrameAvailable(std::function<void()> callback) {
   on_frame_available_ = std::move(callback);
-
-#ifdef HAVE_WPE_PLATFORM
-  // Force WPE to render a new frame by triggering a resize.
-  // This is needed because:
-  // 1. The first frame may have been rendered before this callback was set
-  // 2. We release buffers immediately in OnWpePlatformBufferRendered, so
-  //    old EGL images may be invalid
-  // 3. A resize notification causes WPE to re-render with the current content
-  //
-  // We use g_idle_add to defer this slightly, ensuring the texture registration
-  // is complete before we trigger the new frame.
-  if (on_frame_available_ && wpe_toplevel_ != nullptr) {
-    WPEToplevel* toplevel = wpe_toplevel_;
-    int w = width_;
-    int h = height_;
-    g_idle_add_full(
-        G_PRIORITY_HIGH,
-        [](gpointer user_data) -> gboolean {
-          auto* data = static_cast<std::tuple<WPEToplevel*, int, int>*>(user_data);
-          WPEToplevel* tl = std::get<0>(*data);
-          int width = std::get<1>(*data);
-          int height = std::get<2>(*data);
-          // Trigger a resize to force WPE to render a new frame
-          if (tl != nullptr) {
-            wpe_toplevel_resize(tl, width, height);
-          }
-          delete data;
-          return G_SOURCE_REMOVE;
-        },
-        new std::tuple<WPEToplevel*, int, int>(toplevel, w, h), nullptr);
-  }
-#endif
 }
 
 void InAppWebView::SetOnCursorChanged(std::function<void(const std::string&)> callback) {
@@ -4856,19 +3070,13 @@ gboolean InAppWebView::OnAuthenticate(WebKitWebView* web_view, WebKitAuthenticat
   return TRUE;  // We're handling the request
 }
 
-// NOTE: WPE WebKit renders offscreen without a GDK window.
-// We use the Flutter window's GDK window to display the native GTK context menu.
+// NOTE: WebKitGTK webview widget 的菜单父窗口取 Flutter 顶层窗口的 GdkWindow。
 
 // 签名对齐 WebKitGTK 4.1 的 context-menu 信号（含 GdkEvent*，见头文件注释）。
-#ifdef HAVE_WEBKIT_GTK
 gboolean InAppWebView::OnContextMenu(WebKitWebView* web_view, WebKitContextMenu* context_menu,
                                      GdkEvent* event, WebKitHitTestResult* hit_test_result,
                                      gpointer user_data) {
   (void)event;
-#else
-gboolean InAppWebView::OnContextMenu(WebKitWebView* web_view, WebKitContextMenu* context_menu,
-                                     WebKitHitTestResult* hit_test_result, gpointer user_data) {
-#endif
   auto* self = static_cast<InAppWebView*>(user_data);
 
   // Disable context menu if setting is enabled
@@ -6799,13 +5007,6 @@ gboolean InAppWebView::OnEnterFullscreen(WebKitWebView* web_view, gpointer user_
   auto* self = static_cast<InAppWebView*>(user_data);
   self->is_fullscreen_ = true;
 
-  // Notify WPE backend that we entered fullscreen
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (self->wpe_backend_ != nullptr) {
-    wpe_view_backend_dispatch_did_enter_fullscreen(self->wpe_backend_);
-  }
-#endif
-
   if (self->channel_delegate_) {
     self->channel_delegate_->onEnterFullscreen();
   }
@@ -6815,13 +5016,6 @@ gboolean InAppWebView::OnEnterFullscreen(WebKitWebView* web_view, gpointer user_
 gboolean InAppWebView::OnLeaveFullscreen(WebKitWebView* web_view, gpointer user_data) {
   auto* self = static_cast<InAppWebView*>(user_data);
   self->is_fullscreen_ = false;
-
-  // Notify WPE backend that we exited fullscreen
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  if (self->wpe_backend_ != nullptr) {
-    wpe_view_backend_dispatch_did_exit_fullscreen(self->wpe_backend_);
-  }
-#endif
 
   if (self->channel_delegate_) {
     self->channel_delegate_->onExitFullscreen();
@@ -6906,28 +5100,6 @@ void InAppWebView::OnWebProcessTerminated(WebKitWebView* web_view,
 
   g_warning("InAppWebView[%ld]: WebProcess terminated (reason=%s, didCrash=%s)", self->id_,
             reason_str, didCrash ? "true" : "false");
-
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  // IMPORTANT: When WebProcess crashes (especially from "Failed to bind wl_compositor"),
-  // the WPE FDO connection is broken. We should NOT call any WPE FDO functions here
-  // as they may cause additional errors or hangs. Simply null out the pointer.
-  //
-  // The exported_image_ was being used by the crashed WebProcess, and its underlying
-  // Wayland resources are now invalid. Calling
-  // wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image on a broken connection can
-  // cause further issues.
-  {
-    std::lock_guard<std::mutex> lock(self->exported_image_mutex_);
-    if (self->exported_image_ != nullptr) {
-      g_message(
-          "InAppWebView[%ld]: Nulling stale EGL image %p after WebProcess termination (not "
-          "releasing via WPE FDO)",
-          self->id_, (void*)self->exported_image_);
-      // Don't call WPE FDO release - the connection is broken
-      self->exported_image_ = nullptr;
-    }
-  }
-#endif  // HAVE_WPE_BACKEND_LEGACY
 
   if (self->channel_delegate_) {
     self->channel_delegate_->onRenderProcessGone(didCrash);
@@ -7159,15 +5331,10 @@ gboolean InAppWebView::OnRunFileChooser(WebKitWebView* web_view, WebKitFileChoos
 // === Option Menu (HTML <select>) Handler ===
 
 // 签名对齐 WebKitGTK 4.1 的 show-option-menu 信号（含 GdkEvent*，见头文件注释）。
-#ifdef HAVE_WEBKIT_GTK
 gboolean InAppWebView::OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu,
                                         GdkEvent* event, WebKitRectangle* rectangle,
                                         gpointer user_data) {
   (void)event;
-#else
-gboolean InAppWebView::OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu,
-                                        WebKitRectangle* rectangle, gpointer user_data) {
-#endif
   auto* self = static_cast<InAppWebView*>(user_data);
 
   // Hide any existing option menu first
@@ -8002,81 +6169,6 @@ void InAppWebView::initializeWindowIdJS() {
   evaluateJavascript(script, std::nullopt, nullptr);
 }
 
-#ifdef HAVE_WPE_BACKEND_LEGACY
-void InAppWebView::OnExportShmBuffer(struct wpe_fdo_shm_exported_buffer* buffer) {
-  if (buffer == nullptr) {
-    return;
-  }
-
-  // Get the wl_shm_buffer from the exported buffer
-  struct wl_shm_buffer* shm_buffer = wpe_fdo_shm_exported_buffer_get_shm_buffer(buffer);
-  if (shm_buffer == nullptr) {
-    // Release the buffer
-    if (exportable_ != nullptr) {
-      wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(exportable_, buffer);
-    }
-    return;
-  }
-
-  // Get buffer dimensions and data
-  int32_t width = wl_shm_buffer_get_width(shm_buffer);
-  int32_t height = wl_shm_buffer_get_height(shm_buffer);
-  int32_t stride = wl_shm_buffer_get_stride(shm_buffer);
-  (void)wl_shm_buffer_get_format(shm_buffer);  // format not used
-
-  // Begin access to buffer data
-  wl_shm_buffer_begin_access(shm_buffer);
-  void* data = wl_shm_buffer_get_data(shm_buffer);
-
-  if (data != nullptr && width > 0 && height > 0) {
-    // Copy to our pixel buffer
-    // Note: stride is the row pitch in bytes (may include padding)
-
-    size_t write_idx = write_buffer_index_.load(std::memory_order_relaxed);
-    auto& pixel_buffer = pixel_buffers_[write_idx];
-
-    // Use width*4 for tightly packed RGBA output (no stride padding)
-    size_t output_row_size = static_cast<size_t>(width) * 4;
-    size_t output_size = static_cast<size_t>(height) * output_row_size;
-
-    if (pixel_buffer.data.size() != output_size) {
-      pixel_buffer.data.resize(output_size);
-    }
-
-    pixel_buffer.width = static_cast<size_t>(width);
-    pixel_buffer.height = static_cast<size_t>(height);
-
-    // Convert from BGRA (WL_SHM_FORMAT_ARGB8888 in memory) to RGBA
-    // Using SIMD-optimized conversion for better performance on ARM (NEON) and x86 (SSE2/SSSE3)
-    uint8_t* src = static_cast<uint8_t*>(data);
-    uint8_t* dst = pixel_buffer.data.data();
-
-    ConvertARGB32ToRGBA(src, dst, width, height, stride);
-
-    // Swap buffers
-    {
-      std::lock_guard<std::mutex> lock(buffer_swap_mutex_);
-      read_buffer_index_.store(write_idx, std::memory_order_release);
-      write_buffer_index_.store((write_idx + 1) % kNumBuffers, std::memory_order_relaxed);
-    }
-  }
-
-  // End access
-  wl_shm_buffer_end_access(shm_buffer);
-
-  // Release the buffer back to WPE
-  if (exportable_ != nullptr) {
-    wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(exportable_, buffer);
-    wpe_view_backend_exportable_fdo_dispatch_frame_complete(exportable_);
-  }
-
-  // Notify that a new frame is available
-  if (on_frame_available_) {
-    on_frame_available_();
-  }
-}
-#endif  // HAVE_WPE_BACKEND_LEGACY
-
 // === Custom Scheme Handler ===
 
 void InAppWebView::RegisterCustomSchemes() {
@@ -8207,20 +6299,3 @@ void InAppWebView::OnCustomSchemeRequest(WebKitURISchemeRequest* request, gpoint
 }
 
 }  // namespace flutter_inappwebview_plugin
-
-#ifdef HAVE_WPE_BACKEND_LEGACY
-// C-style callback implementation for WPE FDO EGL export
-// Must be outside the namespace for C API compatibility
-extern "C" {
-static void wpe_export_fdo_egl_image_callback(void* data,
-                                              struct wpe_fdo_egl_exported_image* image) {
-  auto* self = static_cast<flutter_inappwebview_plugin::InAppWebView*>(data);
-  self->OnExportDmaBuf(image);
-}
-
-static void wpe_export_shm_buffer_callback(void* data, struct wpe_fdo_shm_exported_buffer* buffer) {
-  auto* self = static_cast<flutter_inappwebview_plugin::InAppWebView*>(data);
-  self->OnExportShmBuffer(buffer);
-}
-}
-#endif

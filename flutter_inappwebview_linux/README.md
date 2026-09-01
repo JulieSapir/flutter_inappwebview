@@ -1,6 +1,6 @@
-# flutter\_inappwebview\_linux
+# flutter_inappwebview_linux
 
-The Linux WPE WebKit implementation of [`flutter_inappwebview`](https://pub.dev/packages/flutter_inappwebview).
+The Linux WebKitGTK implementation of [`flutter_inappwebview`](https://pub.dev/packages/flutter_inappwebview).
 
 ## Usage
 

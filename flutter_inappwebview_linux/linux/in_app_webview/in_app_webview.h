@@ -1,52 +1,16 @@
 #ifndef FLUTTER_INAPPWEBVIEW_PLUGIN_IN_APP_WEBVIEW_H_
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_IN_APP_WEBVIEW_H_
 
-// WPE WebKit-based InAppWebView implementation
+// InAppWebView implementation (WebKitGTK).
 //
-// Uses WPE WebKit for offscreen web rendering.
-// Supports two APIs:
-// - WPEPlatform (HAVE_WPE_PLATFORM): New modern API for WPE WebKit 2.40+
-// - WPEBackend-FDO (HAVE_WPE_BACKEND_LEGACY): Legacy API for older systems
-//
-// WPE WebKit is designed for embedded systems and offers excellent offscreen rendering
-// capabilities through its backend system.
-//
-// Key features:
-// - No GTK widget hierarchy required
-// - Uses DMA-BUF based buffer sharing for GPU efficiency
-// - Better suited for headless/offscreen rendering scenarios
-// - Direct OpenGL texture export (zero-copy when supported)
-//
-// Required packages (Ubuntu/Debian):
-//   - libwpe-1.0-dev (or build from source)
-//   - wpewebkit (build from source or use Flatpak)
-//   - wpe-platform-headless-2.0 (recommended) OR wpebackend-fdo-1.0-dev (legacy)
-//
-// Build from source:
-//   See WPE_BACKEND.md or https://wpewebkit.org/about/get-wpe.html
-
-// WebKit WebKitGTK backend note:
-// With HAVE_WEBKIT_GTK, InAppWebView renders via webkit_web_view_snapshot()
-// into the shared triple-buffer pixel pipeline; input is synthesized as GdkEvents.
-// Implementation lives in in_app_webview_gtk.cc.
+// 渲染采用 GPU 直通唯一管线（webkit_gpu_capture.*）：widget 挂 override-redirect
+// 屏外 popup 宿主，XComposite redirect + XDamage 驱动 + EGLImage 零拷贝。
+// 输入合成 GdkEvent（实现见 in_app_webview_gtk.cc）。无 CPU 回退管线：
+// 能力不满足时显式报错。
 
 #include <flutter_linux/flutter_linux.h>
 
-// WebKit core includes (WebKitGTK or WPE, selected at build time)
-#include "../webkit_include.h"
-
-// WPEPlatform API (new modern API - default)
-#ifdef HAVE_WPE_PLATFORM
-#include <wpe/headless/wpe-headless.h>
-#include <wpe/wpe-platform.h>
-#endif
-
-// WPEBackend-FDO API (legacy fallback)
-#ifdef HAVE_WPE_BACKEND_LEGACY
-#include <wpe/fdo-egl.h>
-#include <wpe/fdo.h>
-#endif
-
+// WebKit core includes (WebKitGTK)
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -69,12 +33,8 @@
 #include "../types/ssl_certificate.h"
 #include "../types/url_request.h"
 #include "../types/user_script.h"
+#include "../webkit_include.h"
 #include "in_app_webview_settings.h"
-
-// Forward declaration of WPE types in global scope to avoid namespace conflicts
-#ifdef HAVE_WPE_BACKEND_LEGACY
-struct wpe_fdo_egl_exported_image;
-#endif
 
 namespace flutter_inappwebview_plugin {
 
@@ -105,11 +65,9 @@ struct InAppWebViewCreationParams {
   WebKitWebView* relatedWebView = nullptr;  // For creating related WebViews (shares web process)
   std::vector<std::shared_ptr<UserScript>> initialUserScripts;  // User scripts to inject
   WebKitWebContext* webContext = nullptr;  // Custom WebKitWebContext from WebViewEnvironment
-#ifdef HAVE_WEBKIT_GTK
   // True when the widget is hosted inside a browser's GTK window (InAppBrowser):
   // skips the offscreen host and lets the browser own the widget hierarchy.
   bool hostInBrowserWindow = false;
-#endif
 };
 
 // Pointer event kind (matches Dart side)
@@ -266,28 +224,28 @@ class InAppWebView {
   void setSize(int width, int height);
   void setScaleFactor(double scale_factor);
 
-  // Focus/Activity state management (from WPE view-backend API)
+  // Focus/Activity state management
   void setFocused(bool focused);
   void setVisible(bool visible);
   uint32_t getActivityState() const;
 
-  // Refresh rate management (from WPE view-backend API)
+  // Refresh rate management（WebKitGTK 无协商 API，仅通道协议缓存）
   void setTargetRefreshRate(uint32_t rate);
   uint32_t getTargetRefreshRate() const;
 
-  // Screen scale management (from WPE Platform API)
+  // Screen scale management
   double getScreenScale() const;
   void setScreenScale(double scale);
 
-  // Visibility management (from WPE Platform API)
+  // Visibility management
   bool isVisible() const;
 
-  // Fullscreen control (from WPE view-backend API)
+  // Fullscreen control（WebKitGTK 走 enter/leave-fullscreen 信号）
   void requestEnterFullscreen();
   void requestExitFullscreen();
   bool isInFullscreen() const { return is_fullscreen_; }
 
-  // Pointer lock support (from WPE view-backend API) - for games/immersive apps
+  // Pointer lock support - for games/immersive apps（WebKitGTK 无公开 API，返回 false）
   void setPointerLockHandler(std::function<bool(bool)> handler);
   bool requestPointerLock();
   bool requestPointerUnlock();
@@ -303,22 +261,7 @@ class InAppWebView {
                       const std::vector<std::tuple<int, double, double, int>>& touchPoints);
 
   // Texture pixel buffer access (called by texture classes)
-  size_t GetPixelBufferSize(uint32_t* out_width, uint32_t* out_height) const;
-  bool CopyPixelBufferTo(uint8_t* dst, size_t dst_size, uint32_t* out_width,
-                         uint32_t* out_height) const;
-
-  // DMA-BUF export (WPE-specific, for zero-copy GPU texture sharing)
-  bool HasDmaBufExport() const;
-  bool GetDmaBufFd(int* fd, uint32_t* stride, uint32_t* width, uint32_t* height) const;
-
-  // EGL image access (for zero-copy texture sharing with Flutter)
-  // Returns the current EGL image handle (EGLImageKHR) and dimensions.
-  // The EGL image is owned by WPE and remains valid until the next frame.
-  void* GetCurrentEglImage(uint32_t* out_width, uint32_t* out_height) const;
-
-  // Skip pixel readback - when using zero-copy EGL texture mode, we don't need
-  // to read pixels back to CPU. This improves performance and avoids GL context issues.
-  void SetSkipPixelReadback(bool skip) { skip_pixel_readback_ = skip; }
+  // 已随 CPU 回退管线移除：GPU 直通纹理由 webkit_gpu_capture 直接提供
 
   // Frame available callback (called when new frame is ready)
   void SetOnFrameAvailable(std::function<void()> callback);
@@ -431,26 +374,16 @@ class InAppWebView {
   void insertImage(const std::string& imageUri);
   void createLink(const std::string& linkUri);
 
-  // Check if WPE WebKit is available on the system
-  // (With the WebKitGTK backend this always returns true; the name is kept
-  //  for channel-protocol compatibility.)
+  // Check if the WebKit backend is available on the system
+  // （方法名保留 WPE 字样仅为 Dart 侧通道协议兼容，恒为 true）
   static bool IsWpeWebKitAvailable();
 
-#ifdef HAVE_WEBKIT_GTK
   // GPU 直通是否激活（CustomPlatformView 据此选择纹理类型）。
   bool IsGpuCaptureActive() const;
   // 捕获器弱访问（供 GPU 纹理构造）。
   WebKitGpuCapture* gpu_capture() const;
   // GPU 纹理注册完成后接入帧输出（设置 damage→mark 回调并补首帧）。
   void AttachGpuCaptureOutput();
-#endif
-
-#ifdef HAVE_WPE_PLATFORM
-  // Check if DMA-BUF rendering should be used
-  // Returns true if DMA-BUF rendering is expected to work, false if SHM should be used
-  // Note: Environment detection is done at plugin registration via utils/software_rendering.h
-  static bool PreflightDmaBufSupport();
-#endif
 
   // === Multi-Window Support ===
 
@@ -490,87 +423,18 @@ class InAppWebView {
   // WPE WebKit view
   WebKitWebView* webview_ = nullptr;
 
-#ifdef HAVE_WPE_PLATFORM
-  // === WPEPlatform API members (modern) ===
-  WPEDisplay* wpe_display_ = nullptr;    // Owned headless display
-  WPEView* wpe_view_ = nullptr;          // From webkit_web_view_get_wpe_view, not owned
-  WPEToplevel* wpe_toplevel_ = nullptr;  // From wpe_view_get_toplevel, not owned
-
-  // Buffer rendering for WPEPlatform
-  WPEBuffer* current_buffer_ = nullptr;  // Current frame buffer (borrowed, not owned)
-  void* current_egl_image_ = nullptr;    // EGL image created from current buffer
-  uint32_t current_buffer_width_ = 0;    // Width of current buffer
-  uint32_t current_buffer_height_ = 0;   // Height of current buffer
-  gulong buffer_rendered_handler_ = 0;   // Signal handler ID for buffer-rendered
-  gulong scale_changed_handler_ = 0;     // Signal handler ID for notify::scale-factor
-  mutable std::mutex wpe_buffer_mutex_;  // Mutex for thread-safe buffer access
-#endif
-
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  // === WPEBackend-FDO API members (legacy) ===
-  WebKitWebViewBackend* backend_ = nullptr;
-  struct wpe_view_backend* wpe_backend_ = nullptr;
-
-  // WPE FDO exportable (for DMA-BUF buffer export)
-  struct wpe_view_backend_exportable_fdo* exportable_ = nullptr;
-
-  // Current EGL image from WPE (for zero-copy GPU texture sharing).
-  ::wpe_fdo_egl_exported_image* exported_image_ = nullptr;
-
-  // Mutex for protecting exported_image_ access from multiple threads
-  mutable std::mutex exported_image_mutex_;
-
-  // Flag to indicate the WebProcess has crashed and EGL resources are invalid
-  // This prevents using stale EGL images after a crash
-  std::atomic<bool> web_process_crashed_{false};
-#endif
-
-  // EGL context for reading back pixels (both APIs)
-  void* egl_display_ = nullptr;        // EGLDisplay
-  void* egl_context_ = nullptr;        // EGLContext for readback
-  unsigned int fbo_ = 0;               // Framebuffer object for EGL image binding
-  unsigned int readback_texture_ = 0;  // Texture for EGL image
-
-#ifdef HAVE_WEBKIT_GTK
-  // === WebKitGTK backend members ===
-  // Offscreen host window: holds the WebKitWebView widget hierarchy without
-  // mapping a visible toplevel. Required so the widget can realize/render
-  // while the visible output goes through the texture pipeline.
-  // GPU 直通模式下改为 override-redirect 的 GTK_WINDOW_POPUP（屏外定位）：
-  // GTK3 离屏宿主不产生原生 X 窗口，XComposite 捕获需要真实窗口。
+  // === 离屏宿主与 GPU 直通 ===
+  // override-redirect popup 宿主（屏外定位）：XComposite 捕获需要真实原生
+  // X 窗口，GTK3 离屏宿主不产生 X 窗口。
   GtkWindow* gtk_host_window_ = nullptr;
 
-  // GPU 直通捕获（XComposite redirect + EGLImage 零拷贝）。
-  // 能力检查不满足时为空，回退 snapshot 管线。
+  // GPU 直通捕获（XComposite redirect + EGLImage 零拷贝）。构造时能力检查
+  // 失败则为空（唯一渲染管线不可用，显式报错，无回退）。
   std::unique_ptr<WebKitGpuCapture> gpu_capture_ = nullptr;
-
-  // Snapshot scheduling state (GTK main thread only)
-  bool snapshot_pending_ = false;      // true while an async snapshot is in flight
-  bool snapshot_dirty_ = true;         // set when content changed and a snapshot is needed
-  int64_t snapshot_fps_start_us_ = 0;  // fps 打点窗口起点（0=未开始）
-  uint32_t snapshot_fps_frames_ = 0;   // 窗口内成功交付的 snapshot 帧数
 
   // GTK signal handlers
   gulong gtk_scale_handler_id_ = 0;         // notify::scale-factor on the webview widget
   gulong gtk_window_scale_handler_id_ = 0;  // notify::scale-factor on the gtk window
-  guint snapshot_ticker_source_ = 0;        // g_timeout source id for frame pacing
-#endif
-
-  // Triple buffering for pixel data (fallback when DMA-BUF not available)
-  static constexpr size_t kNumBuffers = 3;
-  struct PixelBuffer {
-    std::vector<uint8_t> data;
-    size_t width = 0;
-    size_t height = 0;
-  };
-  std::array<PixelBuffer, kNumBuffers> pixel_buffers_;
-  std::atomic<size_t> write_buffer_index_{0};
-  std::atomic<size_t> read_buffer_index_{1};
-  mutable std::mutex buffer_swap_mutex_;
-
-  // Flag to skip pixel readback when using zero-copy EGL texture mode
-  // When true, OnExportDmaBuf won't call ReadPixelsFromEglImage
-  bool skip_pixel_readback_ = false;
 
   // View dimensions
   int width_ = 800;
@@ -678,10 +542,6 @@ class InAppWebView {
   // Target refresh rate (0 = default)
   uint32_t target_refresh_rate_ = 0;
 
-  // Monitor change tracking for refresh rate updates
-  gulong monitors_changed_handler_id_ = 0;
-  gulong configure_event_handler_id_ = 0;
-
   // Download signal handler ID
   gulong download_started_handler_id_ = 0;
 
@@ -702,37 +562,21 @@ class InAppWebView {
   bool pointer_locked_ = false;
 
   // === Initialization ===
-  void InitWpeBackend();
   void InitWebView(const InAppWebViewCreationParams& params);
   void RegisterEventHandlers();
   void PrepareAndAddUserScripts();  // Add plugin scripts based on settings
-  void SetupMonitorChangeHandlers();
-  void CleanupMonitorChangeHandlers();
-  void UpdateMonitorRefreshRate();
 
-#ifdef HAVE_WEBKIT_GTK
   // === WebKitGTK backend methods (implemented in in_app_webview_gtk.cc) ===
   // Creates the offscreen host window, mounts the widget and realizes it.
-  // GPU 直通能力可用时创建屏外 popup 宿主并启动 XComposite 捕获。
+  // 创建屏外 popup 宿主并启动 XComposite 捕获（GPU 直通唯一管线）。
   void InitGtkHost();
   // Destroys the offscreen host window (must run before webview_ is unref'ed).
   void ShutdownGtkHost();
-  // Requests an async visible-region snapshot (no-op if one is already in flight).
-  // GPU 直通激活时改道为 PresentOnce（damage 驱动，无快照）。
+  // GPU 直通强制补帧入口（resize/scale 变化后重取当前内容别名并入队）。
+  // 方法名保留以复用历史调用点。
   void RequestSnapshot();
-  // Async callback for webkit_web_view_snapshot().
-  static void OnSnapshotReady(GObject* source_object, GAsyncResult* result, gpointer user_data);
-  // Converts the snapshot surface to BGRA, writes it into the triple-buffer
-  // pixel pipeline and notifies Flutter via on_frame_available_.
-  void DeliverSnapshot(cairo_surface_t* surface);
   // Synthesizes a GdkEvent targeted at the webview widget and dispatches it.
   void DispatchGdkEvent(GdkEvent* event);
-
-  // Frame pacing ticker (WebKitGTK has no per-frame callback; the ticker
-  // drives RequestSnapshot while snapshot_pending_ prevents queue buildup)
-  void StartSnapshotTicker();
-  void StopSnapshotTicker();
-  static gboolean OnSnapshotTick(gpointer user_data);
 
   // === Input synthesis (implemented in in_app_webview_gtk.cc) ===
   void GtkSetCursorPos(double x, double y);
@@ -741,23 +585,9 @@ class InAppWebView {
   void GtkSendKeyEvent(int type, int64_t keyCode, int scanCode, uint32_t modifiers);
   void GtkSendTouchEvent(int type, int id, double x, double y,
                          const std::vector<std::tuple<int, double, double, int>>& touchPoints);
-#endif
 
  public:
-#ifdef HAVE_WPE_BACKEND_LEGACY
-  // === WPE FDO backend callbacks (legacy API only) ===
-  // Instance method called from C callback (must be public)
-  void OnExportDmaBuf(::wpe_fdo_egl_exported_image* image);
-  void OnExportShmBuffer(struct wpe_fdo_shm_exported_buffer* buffer);
-#endif
-
-#ifdef HAVE_WPE_PLATFORM
-  // === WPEPlatform buffer rendering callback ===
-  // Called when a new frame buffer is rendered by WPEView
-  void OnWpePlatformBufferRendered(WPEBuffer* buffer);
-#endif
-
-  // DOM fullscreen request handler (called from WPE backend)
+  // DOM fullscreen request handler (called from WebKit signal)
   bool OnDomFullscreenRequest(bool fullscreen);
 
   // Color picker state (for <input type="color"> support in WPE)
@@ -788,15 +618,10 @@ class InAppWebView {
   WebKitOptionMenu* webkit_option_menu_ =
       nullptr;  // WebKit's option menu object (kept alive during popup)
 
-  // Pointer lock handler (called from WPE backend)
+  // Pointer lock handler (called from upper-layer negotiation)
   bool OnPointerLockRequest(bool lock);
 
  private:
-  static void OnFrameDisplayed(void* data);
-
-  // Read pixels from EGL image to CPU buffer
-  void ReadPixelsFromEglImage(void* egl_image, uint32_t width, uint32_t height);
-
   // === WebKit signals (same as WebKitGTK) ===
   static void OnLoadChanged(WebKitWebView* web_view, WebKitLoadEvent load_event,
                             gpointer user_data);
@@ -836,16 +661,9 @@ class InAppWebView {
   // hit_test_result 之间插入了 GdkEvent* 参数（GDK_TYPE_EVENT |
   // G_SIGNAL_TYPE_STATIC_SCOPE）。若按旧 4 参签名接信号，emit 时会把
   // hit_test_result 传进 user_data 槽，导致 self 悬空、右键即 segfault。
-  // WPE（WebKitWebView 2 参 API，2.40-2.50）保持旧签名；WPE1 2.52 起同样
-  // 插入 event 参数（恒为 NULL），该分支随 WPE 后端下线一并清理。
-#ifdef HAVE_WEBKIT_GTK
   static gboolean OnContextMenu(WebKitWebView* web_view, WebKitContextMenu* context_menu,
                                 GdkEvent* event, WebKitHitTestResult* hit_test_result,
                                 gpointer user_data);
-#else
-  static gboolean OnContextMenu(WebKitWebView* web_view, WebKitContextMenu* context_menu,
-                                WebKitHitTestResult* hit_test_result, gpointer user_data);
-#endif
 
   static void OnContextMenuDismissed(WebKitWebView* web_view, gpointer user_data);
 
@@ -865,13 +683,8 @@ class InAppWebView {
   // 同 context-menu：GTK 4.1 的 show-option-menu 信号为
   // (menu, GdkEvent*, rectangle)，旧 4 参签名会把 rectangle 静态指针读进
   // user_data 槽，<select> 下拉弹出即 segfault。
-#ifdef HAVE_WEBKIT_GTK
   static gboolean OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu, GdkEvent* event,
                                    WebKitRectangle* rectangle, gpointer user_data);
-#else
-  static gboolean OnShowOptionMenu(WebKitWebView* web_view, WebKitOptionMenu* menu,
-                                   WebKitRectangle* rectangle, gpointer user_data);
-#endif
 
   // === Download Signals ===
   static void OnDownloadStarted(WebKitNetworkSession* network_session, WebKitDownload* download,
@@ -886,11 +699,6 @@ class InAppWebView {
   static void OnNotifyCameraCaptureState(GObject* object, GParamSpec* pspec, gpointer user_data);
   static void OnNotifyMicrophoneCaptureState(GObject* object, GParamSpec* pspec,
                                              gpointer user_data);
-
-  // === Input helpers ===
-  void SendWpePointerEvent(uint32_t type, double x, double y, uint32_t button);
-  void SendWpeAxisEvent(double x, double y, double dx, double dy);
-  void SendWpeKeyboardEvent(uint32_t key, uint32_t state, uint32_t modifiers);
 
   // === JavaScript bridge ===
   void dispatchPlatformReady();

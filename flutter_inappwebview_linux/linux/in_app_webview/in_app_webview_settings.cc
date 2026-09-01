@@ -1,14 +1,10 @@
-// WPE WebKit settings implementation
+// WebKitGTK settings implementation
 
 #include "in_app_webview_settings.h"
 
 #include "../utils/flutter.h"
 #include "../utils/log.h"
 #include "in_app_webview.h"
-
-#ifdef HAVE_WPE_PLATFORM
-#include <wpe/wpe-platform.h>
-#endif
 
 namespace flutter_inappwebview_plugin {
 
@@ -383,114 +379,6 @@ void InAppWebViewSettings::applyToWebView(WebKitWebView* webview) const {
   webkit_settings_set_enable_2d_canvas_acceleration(settings, enable2DCanvasAcceleration);
   webkit_settings_set_allow_modal_dialogs(settings, allowModalDialogs);
 }
-
-#ifdef HAVE_WPE_PLATFORM
-void InAppWebViewSettings::applyWpePlatformSettings(void* display_ptr) const {
-  if (display_ptr == nullptr) {
-    return;
-  }
-
-  WPEDisplay* display = static_cast<WPEDisplay*>(display_ptr);
-  WPESettings* wpe_settings = wpe_display_get_settings(display);
-  if (wpe_settings == nullptr) {
-    return;
-  }
-
-  GError* error = nullptr;
-
-  // Apply dark mode setting
-  if (darkMode.has_value()) {
-    wpe_settings_set_boolean(wpe_settings, WPE_SETTING_DARK_MODE, darkMode.value(),
-                             WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply disable animations setting
-  if (disableAnimations.has_value()) {
-    wpe_settings_set_boolean(wpe_settings, WPE_SETTING_DISABLE_ANIMATIONS,
-                             disableAnimations.value(), WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply font antialias setting
-  if (fontAntialias.has_value()) {
-    wpe_settings_set_boolean(wpe_settings, WPE_SETTING_FONT_ANTIALIAS, fontAntialias.value(),
-                             WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply font hinting style
-  if (fontHintingStyle.has_value()) {
-    wpe_settings_set_uint32(wpe_settings, WPE_SETTING_FONT_HINTING_STYLE,
-                            static_cast<uint32_t>(fontHintingStyle.value()),
-                            WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply font subpixel layout
-  if (fontSubpixelLayout.has_value()) {
-    wpe_settings_set_uint32(wpe_settings, WPE_SETTING_FONT_SUBPIXEL_LAYOUT,
-                            static_cast<uint32_t>(fontSubpixelLayout.value()),
-                            WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply font DPI
-  if (fontDPI.has_value()) {
-    wpe_settings_set_double(wpe_settings, WPE_SETTING_FONT_DPI, fontDPI.value(),
-                            WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply cursor blink time
-  if (cursorBlinkTime.has_value()) {
-    wpe_settings_set_uint32(wpe_settings, WPE_SETTING_CURSOR_BLINK_TIME,
-                            static_cast<uint32_t>(cursorBlinkTime.value()),
-                            WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply double-click distance
-  if (doubleClickDistance.has_value()) {
-    wpe_settings_set_uint32(wpe_settings, WPE_SETTING_DOUBLE_CLICK_DISTANCE,
-                            static_cast<uint32_t>(doubleClickDistance.value()),
-                            WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply double-click time
-  if (doubleClickTime.has_value()) {
-    wpe_settings_set_uint32(wpe_settings, WPE_SETTING_DOUBLE_CLICK_TIME,
-                            static_cast<uint32_t>(doubleClickTime.value()),
-                            WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply drag threshold
-  if (dragThreshold.has_value()) {
-    wpe_settings_set_uint32(wpe_settings, WPE_SETTING_DRAG_THRESHOLD,
-                            static_cast<uint32_t>(dragThreshold.value()),
-                            WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply key repeat delay
-  if (keyRepeatDelay.has_value()) {
-    wpe_settings_set_uint32(wpe_settings, WPE_SETTING_KEY_REPEAT_DELAY,
-                            static_cast<uint32_t>(keyRepeatDelay.value()),
-                            WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-
-  // Apply key repeat interval
-  if (keyRepeatInterval.has_value()) {
-    wpe_settings_set_uint32(wpe_settings, WPE_SETTING_KEY_REPEAT_INTERVAL,
-                            static_cast<uint32_t>(keyRepeatInterval.value()),
-                            WPE_SETTINGS_SOURCE_APPLICATION, &error);
-    g_clear_error(&error);
-  }
-}
-#endif
 
 FlValue* InAppWebViewSettings::toFlValue() const {
   return to_fl_map({

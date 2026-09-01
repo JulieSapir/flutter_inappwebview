@@ -35,9 +35,9 @@ FlPluginRegistrar* InAppWebViewManager::registrar() const {
 
 InAppWebViewManager::~InAppWebViewManager() {
   platform_views_.clear();
-  
+
   keepAliveWebViews_.clear();
-  
+
   windowWebViews_.clear();
 
   if (method_channel_ != nullptr) {
@@ -135,8 +135,7 @@ void InAppWebViewManager::HandleMethodCallImpl(FlMethodCall* method_call) {
       // Built-in schemes that WebKit handles natively
       // These cannot be overridden - WPE WebKit explicitly prohibits it
       static const std::set<std::string> builtInSchemes = {
-        "http", "https", "file", "ftp", "data", "blob", "about", "javascript", "ws", "wss"
-      };
+          "http", "https", "file", "ftp", "data", "blob", "about", "javascript", "ws", "wss"};
 
       // iOS-style behavior: return true only for built-in schemes
       handles = builtInSchemes.find(urlScheme) != builtInSchemes.end();
@@ -169,7 +168,7 @@ void InAppWebViewManager::CreateInAppWebView(FlMethodCall* method_call) {
     if (existingView != nullptr) {
       int64_t texture_id = existingView->texture_id();
       platform_views_[texture_id] = std::move(existingView);
-      
+
       g_autoptr(FlValue) result = make_fl_value(texture_id);
       fl_method_call_respond_success(method_call, result, nullptr);
       return;
@@ -178,10 +177,10 @@ void InAppWebViewManager::CreateInAppWebView(FlMethodCall* method_call) {
 
   InAppWebViewCreationParams params;
   params.id = next_id_++;
-  params.plugin = plugin_;  // Pass plugin instance for accessing managers
+  params.plugin = plugin_;         // Pass plugin instance for accessing managers
   params.gtkWindow = gtk_window_;  // Pass the cached GTK window
-  params.flView = fl_view_;  // Pass the cached FlView for focus restoration
-  params.manager = this;  // Pass manager for multi-window support
+  params.flView = fl_view_;        // Pass the cached FlView for focus restoration
+  params.manager = this;           // Pass manager for multi-window support
 
   FlValue* initial_settings = fl_value_lookup_string(args, "initialSettings");
   if (initial_settings != nullptr && fl_value_get_type(initial_settings) == FL_VALUE_TYPE_MAP) {
@@ -215,7 +214,8 @@ void InAppWebViewManager::CreateInAppWebView(FlMethodCall* method_call) {
   }
 
   FlValue* initial_user_scripts = fl_value_lookup_string(args, "initialUserScripts");
-  if (initial_user_scripts != nullptr && fl_value_get_type(initial_user_scripts) == FL_VALUE_TYPE_LIST) {
+  if (initial_user_scripts != nullptr &&
+      fl_value_get_type(initial_user_scripts) == FL_VALUE_TYPE_LIST) {
     size_t count = fl_value_get_length(initial_user_scripts);
     for (size_t i = 0; i < count; i++) {
       FlValue* script_value = fl_value_get_list_value(initial_user_scripts, i);
@@ -225,7 +225,8 @@ void InAppWebViewManager::CreateInAppWebView(FlMethodCall* method_call) {
     }
   }
 
-  auto webViewEnvironmentIdOpt = get_optional_fl_map_value<std::string>(args, "webViewEnvironmentId");
+  auto webViewEnvironmentIdOpt =
+      get_optional_fl_map_value<std::string>(args, "webViewEnvironmentId");
   if (webViewEnvironmentIdOpt.has_value() && !webViewEnvironmentIdOpt->empty()) {
     WebViewEnvironment* webViewEnv = plugin_ ? plugin_->webViewEnvironment : nullptr;
     WebKitWebContext* webContext = nullptr;
@@ -234,9 +235,11 @@ void InAppWebViewManager::CreateInAppWebView(FlMethodCall* method_call) {
     }
     if (webContext != nullptr) {
       params.webContext = webContext;
-      debugLog("InAppWebViewManager: Using custom WebKitWebContext from WebViewEnvironment id=" + webViewEnvironmentIdOpt.value());
+      debugLog("InAppWebViewManager: Using custom WebKitWebContext from WebViewEnvironment id=" +
+               webViewEnvironmentIdOpt.value());
     } else {
-      debugLog("InAppWebViewManager: WebViewEnvironment not found for id=" + webViewEnvironmentIdOpt.value());
+      debugLog("InAppWebViewManager: WebViewEnvironment not found for id=" +
+               webViewEnvironmentIdOpt.value());
     }
   }
 
@@ -271,7 +274,7 @@ void InAppWebViewManager::DisposeWebView(int64_t texture_id) {
   }
 }
 
-void InAppWebViewManager::AddWindowWebView(int64_t windowId, 
+void InAppWebViewManager::AddWindowWebView(int64_t windowId,
                                            std::unique_ptr<WebViewTransport> transport) {
   windowWebViews_[windowId] = std::move(transport);
 }
@@ -292,13 +295,13 @@ void InAppWebViewManager::RemoveWindowWebView(int64_t windowId) {
 }
 
 void InAppWebViewManager::ClearAllCache(FlMethodCall* method_call, bool includeDiskFiles) {
-  WebKitNetworkSession* session = webkit_network_session_get_default();
-  if (session == nullptr) {
+  WebKitWebContext* context = webkit_web_context_get_default();
+  if (context == nullptr) {
     fl_method_call_respond_success(method_call, fl_value_new_bool(FALSE), nullptr);
     return;
   }
 
-  WebKitWebsiteDataManager* data_manager = webkit_network_session_get_website_data_manager(session);
+  WebKitWebsiteDataManager* data_manager = webkit_web_context_get_website_data_manager(context);
   if (data_manager == nullptr) {
     fl_method_call_respond_success(method_call, fl_value_new_bool(FALSE), nullptr);
     return;
@@ -307,27 +310,26 @@ void InAppWebViewManager::ClearAllCache(FlMethodCall* method_call, bool includeD
   WebKitWebsiteDataTypes types = WEBKIT_WEBSITE_DATA_MEMORY_CACHE;
   if (includeDiskFiles) {
     types = static_cast<WebKitWebsiteDataTypes>(types | WEBKIT_WEBSITE_DATA_DISK_CACHE);
-    types = static_cast<WebKitWebsiteDataTypes>(types | WEBKIT_WEBSITE_DATA_OFFLINE_APPLICATION_CACHE);
+    types =
+        static_cast<WebKitWebsiteDataTypes>(types | WEBKIT_WEBSITE_DATA_OFFLINE_APPLICATION_CACHE);
   }
 
   g_object_ref(method_call);
 
   webkit_website_data_manager_clear(
-      data_manager,
-      types,
-      0,  // timespan = 0 means clear all data
+      data_manager, types,
+      0,        // timespan = 0 means clear all data
       nullptr,  // GCancellable
       [](GObject* source_object, GAsyncResult* res, gpointer user_data) {
         auto* method_call = static_cast<FlMethodCall*>(user_data);
         auto* data_manager = WEBKIT_WEBSITE_DATA_MANAGER(source_object);
 
         GError* error = nullptr;
-        gboolean success = webkit_website_data_manager_clear_finish(
-            data_manager, res, &error);
+        gboolean success = webkit_website_data_manager_clear_finish(data_manager, res, &error);
 
         if (error != nullptr) {
-          fl_method_call_respond_error(
-              method_call, "CLEAR_CACHE_ERROR", error->message, nullptr, nullptr);
+          fl_method_call_respond_error(method_call, "CLEAR_CACHE_ERROR", error->message, nullptr,
+                                       nullptr);
           g_error_free(error);
         } else {
           fl_method_call_respond_success(method_call, fl_value_new_bool(success), nullptr);
@@ -340,8 +342,8 @@ void InAppWebViewManager::ClearAllCache(FlMethodCall* method_call, bool includeD
 
 // Keep-alive management methods
 
-void InAppWebViewManager::StoreKeepAliveWebView(const std::string& keepAliveId, 
-                                                  std::unique_ptr<CustomPlatformView> view) {
+void InAppWebViewManager::StoreKeepAliveWebView(const std::string& keepAliveId,
+                                                std::unique_ptr<CustomPlatformView> view) {
   if (!keepAliveId.empty() && view != nullptr) {
     keepAliveWebViews_[keepAliveId] = std::move(view);
   }
@@ -355,7 +357,8 @@ CustomPlatformView* InAppWebViewManager::GetKeepAliveWebView(const std::string& 
   return nullptr;
 }
 
-std::unique_ptr<CustomPlatformView> InAppWebViewManager::TakeKeepAliveWebView(const std::string& keepAliveId) {
+std::unique_ptr<CustomPlatformView> InAppWebViewManager::TakeKeepAliveWebView(
+    const std::string& keepAliveId) {
   auto it = keepAliveWebViews_.find(keepAliveId);
   if (it != keepAliveWebViews_.end()) {
     auto view = std::move(it->second);
@@ -370,7 +373,7 @@ void InAppWebViewManager::DisposeKeepAlive(const std::string& keepAliveId) {
   if (it != keepAliveWebViews_.end()) {
     keepAliveWebViews_.erase(it);
   }
-  
+
   // Also check if the view is currently active in platform_views_
   // and clear its keepAliveId so it will be destroyed on next dispose
   for (auto& pair : platform_views_) {

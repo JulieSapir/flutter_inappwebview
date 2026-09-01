@@ -21,20 +21,18 @@ WebStorageManager::WebStorageManager(PluginInstance* plugin)
   FlBinaryMessenger* messenger = plugin_->messenger();
 
   // Create the method channel
-  channel_ = fl_method_channel_new(
-      messenger,
-      "com.pichillilorenzo/flutter_inappwebview_webstoragemanager",
-      FL_METHOD_CODEC(fl_standard_method_codec_new()));
+  channel_ =
+      fl_method_channel_new(messenger, "com.pichillilorenzo/flutter_inappwebview_webstoragemanager",
+                            FL_METHOD_CODEC(fl_standard_method_codec_new()));
 
   // Set the method call handler
-  fl_method_channel_set_method_call_handler(
-      channel_, HandleMethodCall, this, nullptr);
+  fl_method_channel_set_method_call_handler(channel_, HandleMethodCall, this, nullptr);
 
-  // Get the default website data manager from the network session
-  WebKitNetworkSession* session = webkit_network_session_get_default();
-  if (session != nullptr) {
-    data_manager_ = webkit_network_session_get_website_data_manager(session);
-    // data_manager_ is owned by session, don't unref it
+  // Get the default website data manager from the web context
+  WebKitWebContext* context = webkit_web_context_get_default();
+  if (context != nullptr) {
+    data_manager_ = webkit_web_context_get_website_data_manager(context);
+    // data_manager_ is owned by the web context, don't unref it
   }
 }
 
@@ -44,13 +42,12 @@ WebStorageManager::~WebStorageManager() {
     g_object_unref(channel_);
     channel_ = nullptr;
   }
-  // data_manager_ is owned by the network session, don't unref it
+  // data_manager_ is owned by the web context, don't unref it
   data_manager_ = nullptr;
   plugin_ = nullptr;
 }
 
-void WebStorageManager::HandleMethodCall(FlMethodChannel* channel,
-                                         FlMethodCall* method_call,
+void WebStorageManager::HandleMethodCall(FlMethodChannel* channel, FlMethodCall* method_call,
                                          gpointer user_data) {
   auto* self = static_cast<WebStorageManager*>(user_data);
   const gchar* method = fl_method_call_get_name(method_call);
@@ -69,8 +66,7 @@ void WebStorageManager::HandleMethodCall(FlMethodChannel* channel,
 WebKitWebsiteDataTypes WebStorageManager::parseDataTypes(FlValue* dataTypesValue) {
   WebKitWebsiteDataTypes types = static_cast<WebKitWebsiteDataTypes>(0);
 
-  if (dataTypesValue == nullptr ||
-      fl_value_get_type(dataTypesValue) != FL_VALUE_TYPE_LIST) {
+  if (dataTypesValue == nullptr || fl_value_get_type(dataTypesValue) != FL_VALUE_TYPE_LIST) {
     return types;
   }
 
@@ -88,7 +84,8 @@ WebKitWebsiteDataTypes WebStorageManager::parseDataTypes(FlValue* dataTypesValue
     } else if (strcmp(typeStr, "WEBKIT_WEBSITE_DATA_MEMORY_CACHE") == 0) {
       types = static_cast<WebKitWebsiteDataTypes>(types | WEBKIT_WEBSITE_DATA_MEMORY_CACHE);
     } else if (strcmp(typeStr, "WEBKIT_WEBSITE_DATA_OFFLINE_APPLICATION_CACHE") == 0) {
-      types = static_cast<WebKitWebsiteDataTypes>(types | WEBKIT_WEBSITE_DATA_OFFLINE_APPLICATION_CACHE);
+      types = static_cast<WebKitWebsiteDataTypes>(types |
+                                                  WEBKIT_WEBSITE_DATA_OFFLINE_APPLICATION_CACHE);
     } else if (strcmp(typeStr, "WEBKIT_WEBSITE_DATA_COOKIES") == 0) {
       types = static_cast<WebKitWebsiteDataTypes>(types | WEBKIT_WEBSITE_DATA_COOKIES);
     } else if (strcmp(typeStr, "WEBKIT_WEBSITE_DATA_SESSION_STORAGE") == 0) {
@@ -98,7 +95,8 @@ WebKitWebsiteDataTypes WebStorageManager::parseDataTypes(FlValue* dataTypesValue
     } else if (strcmp(typeStr, "WEBKIT_WEBSITE_DATA_INDEXEDDB_DATABASES") == 0) {
       types = static_cast<WebKitWebsiteDataTypes>(types | WEBKIT_WEBSITE_DATA_INDEXEDDB_DATABASES);
     } else if (strcmp(typeStr, "WEBKIT_WEBSITE_DATA_SERVICE_WORKER_REGISTRATIONS") == 0) {
-      types = static_cast<WebKitWebsiteDataTypes>(types | WEBKIT_WEBSITE_DATA_SERVICE_WORKER_REGISTRATIONS);
+      types = static_cast<WebKitWebsiteDataTypes>(types |
+                                                  WEBKIT_WEBSITE_DATA_SERVICE_WORKER_REGISTRATIONS);
     }
   }
 
@@ -115,7 +113,8 @@ FlValue* WebStorageManager::dataTypesToFlValue(WebKitWebsiteDataTypes types) {
     fl_value_append_take(list, fl_value_new_string("WEBKIT_WEBSITE_DATA_MEMORY_CACHE"));
   }
   if (types & WEBKIT_WEBSITE_DATA_OFFLINE_APPLICATION_CACHE) {
-    fl_value_append_take(list, fl_value_new_string("WEBKIT_WEBSITE_DATA_OFFLINE_APPLICATION_CACHE"));
+    fl_value_append_take(list,
+                         fl_value_new_string("WEBKIT_WEBSITE_DATA_OFFLINE_APPLICATION_CACHE"));
   }
   if (types & WEBKIT_WEBSITE_DATA_COOKIES) {
     fl_value_append_take(list, fl_value_new_string("WEBKIT_WEBSITE_DATA_COOKIES"));
@@ -130,7 +129,8 @@ FlValue* WebStorageManager::dataTypesToFlValue(WebKitWebsiteDataTypes types) {
     fl_value_append_take(list, fl_value_new_string("WEBKIT_WEBSITE_DATA_INDEXEDDB_DATABASES"));
   }
   if (types & WEBKIT_WEBSITE_DATA_SERVICE_WORKER_REGISTRATIONS) {
-    fl_value_append_take(list, fl_value_new_string("WEBKIT_WEBSITE_DATA_SERVICE_WORKER_REGISTRATIONS"));
+    fl_value_append_take(list,
+                         fl_value_new_string("WEBKIT_WEBSITE_DATA_SERVICE_WORKER_REGISTRATIONS"));
   }
 
   return fl_value_ref(list);
@@ -146,24 +146,18 @@ void WebStorageManager::fetchDataRecords(FlMethodCall* method_call) {
   g_object_ref(method_call);
 
   webkit_website_data_manager_fetch(
-      data_manager_,
-      types,
+      data_manager_, types,
       nullptr,  // GCancellable
       [](GObject* source_object, GAsyncResult* res, gpointer user_data) {
         auto* method_call = static_cast<FlMethodCall*>(user_data);
         auto* data_manager = WEBKIT_WEBSITE_DATA_MANAGER(source_object);
 
         GError* error = nullptr;
-        GList* records = webkit_website_data_manager_fetch_finish(
-            data_manager, res, &error);
+        GList* records = webkit_website_data_manager_fetch_finish(data_manager, res, &error);
 
         if (error != nullptr) {
-          fl_method_call_respond_error(
-              method_call,
-              "FETCH_ERROR",
-              error->message,
-              nullptr,
-              nullptr);
+          fl_method_call_respond_error(method_call, "FETCH_ERROR", error->message, nullptr,
+                                       nullptr);
           g_error_free(error);
           g_object_unref(method_call);
           return;
@@ -176,14 +170,15 @@ void WebStorageManager::fetchDataRecords(FlMethodCall* method_call) {
           const char* name = webkit_website_data_get_name(data);
           WebKitWebsiteDataTypes dataTypes = webkit_website_data_get_types(data);
 
-          g_autoptr(FlValue) record = (name != nullptr)
-              ? to_fl_map({
-                  {"displayName", make_fl_value(name)},
-                  {"dataTypes", WebStorageManager::dataTypesToFlValue(dataTypes)},
-                })
-              : to_fl_map({
-                  {"dataTypes", WebStorageManager::dataTypesToFlValue(dataTypes)},
-                });
+          g_autoptr(FlValue) record =
+              (name != nullptr)
+                  ? to_fl_map({
+                        {"displayName", make_fl_value(name)},
+                        {"dataTypes", WebStorageManager::dataTypesToFlValue(dataTypes)},
+                    })
+                  : to_fl_map({
+                        {"dataTypes", WebStorageManager::dataTypesToFlValue(dataTypes)},
+                    });
 
           fl_value_append(result, record);
         }
@@ -203,8 +198,7 @@ void WebStorageManager::removeDataFor(FlMethodCall* method_call) {
 
   WebKitWebsiteDataTypes types = parseDataTypes(dataTypesValue);
 
-  if (recordListValue == nullptr ||
-      fl_value_get_type(recordListValue) != FL_VALUE_TYPE_LIST ||
+  if (recordListValue == nullptr || fl_value_get_type(recordListValue) != FL_VALUE_TYPE_LIST ||
       fl_value_get_length(recordListValue) == 0) {
     // No records to delete
     fl_method_call_respond_success(method_call, fl_value_new_bool(TRUE), nullptr);
@@ -241,20 +235,17 @@ void WebStorageManager::removeDataFor(FlMethodCall* method_call) {
   g_object_ref(method_call);
 
   webkit_website_data_manager_fetch(
-      data_manager_,
-      types,
-      nullptr,
+      data_manager_, types, nullptr,
       [](GObject* source_object, GAsyncResult* res, gpointer user_data) {
         auto* ctx = static_cast<RemoveContext*>(user_data);
         auto* data_manager = WEBKIT_WEBSITE_DATA_MANAGER(source_object);
 
         GError* error = nullptr;
-        GList* all_records = webkit_website_data_manager_fetch_finish(
-            data_manager, res, &error);
+        GList* all_records = webkit_website_data_manager_fetch_finish(data_manager, res, &error);
 
         if (error != nullptr) {
-          fl_method_call_respond_error(
-              ctx->method_call, "FETCH_ERROR", error->message, nullptr, nullptr);
+          fl_method_call_respond_error(ctx->method_call, "FETCH_ERROR", error->message, nullptr,
+                                       nullptr);
           g_error_free(error);
           g_object_unref(ctx->method_call);
           delete ctx;
@@ -269,20 +260,17 @@ void WebStorageManager::removeDataFor(FlMethodCall* method_call) {
           if (name != nullptr) {
             for (const auto& displayName : ctx->displayNames) {
               if (displayName == name) {
-                matching_records = g_list_prepend(matching_records,
-                                                  webkit_website_data_ref(data));
+                matching_records = g_list_prepend(matching_records, webkit_website_data_ref(data));
                 break;
               }
             }
           }
         }
 
-        g_list_free_full(all_records,
-                         reinterpret_cast<GDestroyNotify>(webkit_website_data_unref));
+        g_list_free_full(all_records, reinterpret_cast<GDestroyNotify>(webkit_website_data_unref));
 
         if (matching_records == nullptr) {
-          fl_method_call_respond_success(ctx->method_call,
-                                         fl_value_new_bool(TRUE), nullptr);
+          fl_method_call_respond_success(ctx->method_call, fl_value_new_bool(TRUE), nullptr);
           g_object_unref(ctx->method_call);
           delete ctx;
           return;
@@ -290,25 +278,22 @@ void WebStorageManager::removeDataFor(FlMethodCall* method_call) {
 
         // Now remove the matching records
         webkit_website_data_manager_remove(
-            ctx->data_manager,
-            ctx->types,
-            matching_records,
-            nullptr,
+            ctx->data_manager, ctx->types, matching_records, nullptr,
             [](GObject* source_object, GAsyncResult* res, gpointer user_data) {
               auto* ctx = static_cast<RemoveContext*>(user_data);
               auto* data_manager = WEBKIT_WEBSITE_DATA_MANAGER(source_object);
 
               GError* error = nullptr;
-              gboolean success = webkit_website_data_manager_remove_finish(
-                  data_manager, res, &error);
+              gboolean success =
+                  webkit_website_data_manager_remove_finish(data_manager, res, &error);
 
               if (error != nullptr) {
-                fl_method_call_respond_error(
-                    ctx->method_call, "REMOVE_ERROR", error->message, nullptr, nullptr);
+                fl_method_call_respond_error(ctx->method_call, "REMOVE_ERROR", error->message,
+                                             nullptr, nullptr);
                 g_error_free(error);
               } else {
-                fl_method_call_respond_success(ctx->method_call,
-                                               fl_value_new_bool(success), nullptr);
+                fl_method_call_respond_success(ctx->method_call, fl_value_new_bool(success),
+                                               nullptr);
               }
 
               g_object_unref(ctx->method_call);
@@ -331,8 +316,7 @@ void WebStorageManager::removeDataModifiedSince(FlMethodCall* method_call) {
 
   // Get timestamp (seconds since epoch)
   gint64 timestamp = 0;
-  if (timestampValue != nullptr &&
-      fl_value_get_type(timestampValue) == FL_VALUE_TYPE_INT) {
+  if (timestampValue != nullptr && fl_value_get_type(timestampValue) == FL_VALUE_TYPE_INT) {
     timestamp = fl_value_get_int(timestampValue);
   }
 
@@ -344,25 +328,21 @@ void WebStorageManager::removeDataModifiedSince(FlMethodCall* method_call) {
   g_object_ref(method_call);
 
   webkit_website_data_manager_clear(
-      data_manager_,
-      types,
-      timespan,
+      data_manager_, types, timespan,
       nullptr,  // GCancellable
       [](GObject* source_object, GAsyncResult* res, gpointer user_data) {
         auto* method_call = static_cast<FlMethodCall*>(user_data);
         auto* data_manager = WEBKIT_WEBSITE_DATA_MANAGER(source_object);
 
         GError* error = nullptr;
-        gboolean success = webkit_website_data_manager_clear_finish(
-            data_manager, res, &error);
+        gboolean success = webkit_website_data_manager_clear_finish(data_manager, res, &error);
 
         if (error != nullptr) {
-          fl_method_call_respond_error(
-              method_call, "CLEAR_ERROR", error->message, nullptr, nullptr);
+          fl_method_call_respond_error(method_call, "CLEAR_ERROR", error->message, nullptr,
+                                       nullptr);
           g_error_free(error);
         } else {
-          fl_method_call_respond_success(method_call,
-                                         fl_value_new_bool(success), nullptr);
+          fl_method_call_respond_success(method_call, fl_value_new_bool(success), nullptr);
         }
 
         g_object_unref(method_call);

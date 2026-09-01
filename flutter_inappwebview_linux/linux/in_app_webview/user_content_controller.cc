@@ -32,10 +32,10 @@ UserContentController::~UserContentController() {
   // Unregister all message handlers
   if (manager_valid) {
     for (const auto& name : registered_message_handlers_) {
-      webkit_compat_unregister_script_message_handler(content_manager_, name.c_str(), nullptr);
+      webkit_user_content_manager_unregister_script_message_handler(content_manager_, name.c_str());
     }
     for (const auto& name : registered_message_handlers_with_reply_) {
-      webkit_compat_unregister_script_message_handler(content_manager_, name.c_str(), nullptr);
+      webkit_user_content_manager_unregister_script_message_handler(content_manager_, name.c_str());
     }
   }
   registered_message_handlers_.clear();
@@ -163,7 +163,7 @@ void UserContentController::registerScriptMessageHandler(const std::string& name
 
   // Register the handler with WebKit (WPE API since 2.40; GTK maps via compat)
   gboolean success =
-      webkit_compat_register_script_message_handler(content_manager_, name.c_str(), nullptr);
+      webkit_user_content_manager_register_script_message_handler(content_manager_, name.c_str());
 
   if (!success) {
     errorLog("UserContentController: Failed to register message handler " + name);

@@ -6,85 +6,9 @@
 
 #include "../utils/flutter.h"
 #include "../utils/log.h"
-#ifndef HAVE_WEBKIT_GTK
-// EGL zero-copy 纹理仅 WPE 后端提供（WebKitGTK 无纹理导出 API）
-#include "inappwebview_egl_texture.h"
-#else
 #include "inappwebview_gpu_texture.h"
-#endif
-#include "inappwebview_texture.h"
 
 namespace flutter_inappwebview_plugin {
-
-namespace {
-#ifndef HAVE_WEBKIT_GTK
-// Check if GL textures should be used (enabled by default, can be disabled)
-// Disable with FLUTTER_INAPPWEBVIEW_LINUX_DISABLE_GL=1 to force software rendering.
-bool UseGLTextureEnvOverride() {
-  if (g_getenv("FLUTTER_INAPPWEBVIEW_LINUX_DISABLE_GL") != nullptr) {
-    return false;
-  }
-  return true;
-}
-
-// Check if OpenGL is actually available in the current GDK backend
-bool IsOpenGLAvailable() {
-  static bool checked = false;
-  static bool available = false;
-
-  if (checked) {
-    return available;
-  }
-  checked = true;
-
-  GdkDisplay* display = gdk_display_get_default();
-  if (display == nullptr) {
-    debugLog("CustomPlatformView: No GDK display available");
-    return false;
-  }
-
-  // Try to create a temporary window to test GL support
-  GdkWindowAttr attrs;
-  memset(&attrs, 0, sizeof(attrs));
-  attrs.width = 1;
-  attrs.height = 1;
-  attrs.wclass = GDK_INPUT_OUTPUT;
-  attrs.window_type = GDK_WINDOW_TOPLEVEL;
-
-  GdkWindow* test_window = gdk_window_new(nullptr, &attrs, 0);
-  if (test_window == nullptr) {
-    debugLog("CustomPlatformView: Failed to create test window for GL check");
-    return false;
-  }
-
-  GError* error = nullptr;
-  GdkGLContext* gl_context = gdk_window_create_gl_context(test_window, &error);
-
-  if (gl_context != nullptr) {
-    available = true;
-    g_object_unref(gl_context);
-    debugLog("CustomPlatformView: OpenGL is available");
-  } else {
-    debugLog(std::string("CustomPlatformView: OpenGL not available: ") +
-             (error ? error->message : "unknown error"));
-    if (error) {
-      g_error_free(error);
-    }
-  }
-
-  gdk_window_destroy(test_window);
-
-  return available;
-}
-
-bool UseGLTexture() {
-  if (!UseGLTextureEnvOverride()) {
-    return false;
-  }
-  return IsOpenGLAvailable();
-}
-#endif  // !HAVE_WEBKIT_GTK
-}  // namespace
 
 CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
                                        FlTextureRegistrar* texture_registrar,
@@ -100,36 +24,13 @@ CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
     return;
   }
 
-  // Create texture - two modes:
-  // 1. EGL/GL texture (hardware accelerated) - uses zero-copy EGL when available,
-  //    falls back to pixel buffer upload when EGL is not available (e.g., in VMs)
-  // 2. Pixel buffer texture (software) - pure software fallback when GL is disabled
-  //
-  // The EGL texture handles both EGL and SHM modes internally, providing the best
-  // performance for each environment.
-#ifdef HAVE_WEBKIT_GTK
-  if (webview_->IsGpuCaptureActive()) {
-    // GPU 直通：XComposite + EGLImage 零拷贝纹理（webkit_gpu_capture 供帧）
-    texture_ = FL_TEXTURE(inappwebview_gpu_texture_new(webview_->gpu_capture()));
-    debugLog("CustomPlatformView: using GPU capture texture (WebKitGTK XComposite+EGLImage)");
-  } else {
-    // snapshot 回退：snapshot → 像素缓冲纹理
-    texture_ = FL_TEXTURE(inappwebview_texture_new(webview_.get()));
-    debugLog("CustomPlatformView: using pixel buffer texture (WebKitGTK snapshot)");
+  // 纹理唯一路径：GPU 直通纹理（XComposite + EGLImage 零拷贝，webkit_gpu_capture 供帧）。
+  // 捕获未激活时纹理 populate 显式报错（创建阶段已 errorLog，无回退管线）。
+  if (!webview_->IsGpuCaptureActive()) {
+    errorLog("CustomPlatformView: GPU capture not active; texture will not receive frames");
   }
-#else
-  if (UseGLTexture()) {
-    texture_ = FL_TEXTURE(inappwebview_egl_texture_new(webview_.get()));
-    egl_texture_ = INAPPWEBVIEW_EGL_TEXTURE(texture_);
-    // In zero-copy EGL mode, we don't need pixel readback - the EGL image is passed
-    // directly to Flutter. This improves performance and avoids GL context issues.
-    webview_->SetSkipPixelReadback(true);
-    debugLog("CustomPlatformView: using GL texture (hardware accelerated)");
-  } else {
-    texture_ = FL_TEXTURE(inappwebview_texture_new(webview_.get()));
-    debugLog("CustomPlatformView: using pixel buffer texture (software)");
-  }
-#endif
+  texture_ = FL_TEXTURE(inappwebview_gpu_texture_new(webview_->gpu_capture()));
+  debugLog("CustomPlatformView: using GPU capture texture (XComposite+EGLImage)");
 
   if (texture_ == nullptr) {
     errorLog("CustomPlatformView: failed to create texture");
@@ -156,28 +57,12 @@ CustomPlatformView::CustomPlatformView(FlBinaryMessenger* messenger,
   }
 
   // Set up the webview's callback to mark frame available
-  // For EGL texture, we also update the EGL image reference
-  webview_->SetOnFrameAvailable([this]() {
-#ifndef HAVE_WEBKIT_GTK
-    // If using EGL texture, update the EGL image reference before marking available
-    if (egl_texture_ != nullptr && webview_ != nullptr) {
-      uint32_t width = 0;
-      uint32_t height = 0;
-      void* egl_image = webview_->GetCurrentEglImage(&width, &height);
-      if (egl_image != nullptr) {
-        inappwebview_egl_texture_set_egl_image(egl_texture_, egl_image, width, height);
-      }
-    }
-#endif
-    MarkTextureFrameAvailable();
-  });
+  webview_->SetOnFrameAvailable([this]() { MarkTextureFrameAvailable(); });
 
-#ifdef HAVE_WEBKIT_GTK
   // GPU 直通：纹理注册完成后接入帧输出（damage→mark 接线 + 补首帧）
   if (webview_->IsGpuCaptureActive()) {
     webview_->AttachGpuCaptureOutput();
   }
-#endif
 
   // Set up cursor change callback
   webview_->SetOnCursorChanged(

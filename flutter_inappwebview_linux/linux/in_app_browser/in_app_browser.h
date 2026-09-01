@@ -62,8 +62,8 @@ class InAppBrowser {
   /// @param messenger The Flutter binary messenger for channel communication
   /// @param parentWindow The parent GTK window (optional, for child window type)
   /// @param params Creation parameters
-  InAppBrowser(InAppBrowserManager* manager, FlBinaryMessenger* messenger,
-               GtkWindow* parentWindow, const InAppBrowserCreationParams& params);
+  InAppBrowser(InAppBrowserManager* manager, FlBinaryMessenger* messenger, GtkWindow* parentWindow,
+               const InAppBrowserCreationParams& params);
   ~InAppBrowser();
 
   /// Get the unique ID of this browser
@@ -167,7 +167,6 @@ class InAppBrowser {
   void setupWindow(const InAppBrowserCreationParams& params);
   void setupToolbar();
   void setupWebView(const InAppBrowserCreationParams& params);
-  void setupDrawingArea();
   void applySettings();
   void loadInitialContent(const InAppBrowserCreationParams& params);
 
@@ -184,7 +183,6 @@ class InAppBrowser {
   static void OnForwardClicked(GtkButton* button, gpointer user_data);
   static void OnReloadClicked(GtkButton* button, gpointer user_data);
   static void OnUrlEntryActivated(GtkEntry* entry, gpointer user_data);
-  static gboolean OnDrawingAreaDraw(GtkWidget* widget, cairo_t* cr, gpointer user_data);
   static void OnDrawingAreaRealize(GtkWidget* widget, gpointer user_data);
   static gboolean OnDrawingAreaButtonPress(GtkWidget* widget, GdkEventButton* event,
                                            gpointer user_data);
@@ -192,32 +190,28 @@ class InAppBrowser {
                                              gpointer user_data);
   static gboolean OnDrawingAreaMotionNotify(GtkWidget* widget, GdkEventMotion* event,
                                             gpointer user_data);
-  static gboolean OnDrawingAreaScroll(GtkWidget* widget, GdkEventScroll* event,
-                                      gpointer user_data);
-  static gboolean OnDrawingAreaKeyPress(GtkWidget* widget, GdkEventKey* event,
-                                        gpointer user_data);
+  static gboolean OnDrawingAreaScroll(GtkWidget* widget, GdkEventScroll* event, gpointer user_data);
+  static gboolean OnDrawingAreaKeyPress(GtkWidget* widget, GdkEventKey* event, gpointer user_data);
   static gboolean OnDrawingAreaKeyRelease(GtkWidget* widget, GdkEventKey* event,
                                           gpointer user_data);
-  static void OnDrawingAreaSizeAllocate(GtkWidget* widget, GdkRectangle* allocation, gpointer user_data);
+  static void OnDrawingAreaSizeAllocate(GtkWidget* widget, GdkRectangle* allocation,
+                                        gpointer user_data);
   static gboolean OnDrawingAreaFocusIn(GtkWidget* widget, GdkEventFocus* event, gpointer user_data);
-  static gboolean OnDrawingAreaFocusOut(GtkWidget* widget, GdkEventFocus* event, gpointer user_data);
+  static gboolean OnDrawingAreaFocusOut(GtkWidget* widget, GdkEventFocus* event,
+                                        gpointer user_data);
   static void OnDrawingAreaMap(GtkWidget* widget, gpointer user_data);
   static void OnDrawingAreaUnmap(GtkWidget* widget, gpointer user_data);
-  static gboolean OnDrawingAreaEnterNotify(GtkWidget* widget, GdkEventCrossing* event, gpointer user_data);
-  static gboolean OnDrawingAreaLeaveNotify(GtkWidget* widget, GdkEventCrossing* event, gpointer user_data);
+  static gboolean OnDrawingAreaEnterNotify(GtkWidget* widget, GdkEventCrossing* event,
+                                           gpointer user_data);
+  static gboolean OnDrawingAreaLeaveNotify(GtkWidget* widget, GdkEventCrossing* event,
+                                           gpointer user_data);
   static void OnMenuItemActivated(GtkMenuItem* item, gpointer user_data);
 
-  // GtkGLArea signal handlers (for GPU-accelerated rendering)
+  // GtkGLArea signal handlers（遗留：GTK 模式下 GL area 从未创建）
   static void OnGlAreaRealize(GtkGLArea* area, gpointer user_data);
   static gboolean OnGlAreaRender(GtkGLArea* area, GdkGLContext* context, gpointer user_data);
   static void OnGlAreaResize(GtkGLArea* area, gint width, gint height, gpointer user_data);
   static void OnGlAreaSizeAllocate(GtkWidget* widget, GdkRectangle* allocation, gpointer user_data);
-  
-  // Fallback pixel buffer rendering (for SHM mode or when EGL is unavailable)
-  gboolean RenderFromPixelBuffer(GtkGLArea* area);
-  
-  // Fallback setup for GtkDrawingArea (when GtkGLArea fails)
-  void setupDrawingAreaFallback();
 
   // Cursor change handler
   void OnCursorChanged(const std::string& cursorName);

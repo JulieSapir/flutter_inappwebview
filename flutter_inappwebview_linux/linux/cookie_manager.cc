@@ -165,10 +165,10 @@ CookieManager::~CookieManager() {
 
 WebKitCookieManager* CookieManager::getCookieManager() {
   if (cookie_manager_ == nullptr) {
-    // WPE WebKit 2.x uses NetworkSession API instead of WebContext
-    WebKitNetworkSession* session = webkit_network_session_get_default();
-    if (session != nullptr) {
-      cookie_manager_ = webkit_network_session_get_cookie_manager(session);
+    // WebKitGTK 4.1：cookie 管理器挂在 WebContext 上
+    WebKitWebContext* context = webkit_web_context_get_default();
+    if (context != nullptr) {
+      cookie_manager_ = webkit_web_context_get_cookie_manager(context);
     }
   }
   return cookie_manager_;
@@ -388,7 +388,7 @@ void CookieManager::deleteCookie(const std::string& url, const std::string& name
   // WPE WebKit requires the EXACT SoupCookie object to delete, not a minimal one.
   // We must first fetch all cookies and find the matching one with all its attributes.
   auto* callbackPtr = new std::function<void(bool)>(std::move(callback));
-  
+
   // Capture parameters for the callback
   struct DeleteContext {
     WebKitCookieManager* manager;
@@ -397,7 +397,7 @@ void CookieManager::deleteCookie(const std::string& url, const std::string& name
     std::string path;
     std::function<void(bool)>* callback;
   };
-  
+
   auto* ctx = new DeleteContext{manager, name, cookieDomain, path, callbackPtr};
 
   webkit_cookie_manager_get_all_cookies(
@@ -405,11 +405,11 @@ void CookieManager::deleteCookie(const std::string& url, const std::string& name
       nullptr,  // cancellable
       [](GObject* source, GAsyncResult* result, gpointer user_data) {
         auto* ctx = static_cast<DeleteContext*>(user_data);
-        
+
         GError* error = nullptr;
-        GList* cookies = webkit_cookie_manager_get_all_cookies_finish(
-            WEBKIT_COOKIE_MANAGER(source), result, &error);
-        
+        GList* cookies = webkit_cookie_manager_get_all_cookies_finish(WEBKIT_COOKIE_MANAGER(source),
+                                                                      result, &error);
+
         if (error != nullptr) {
           errorLog(std::string("CookieManager: deleteCookie fetch failed: ") + error->message);
           g_error_free(error);
@@ -418,7 +418,7 @@ void CookieManager::deleteCookie(const std::string& url, const std::string& name
           delete ctx;
           return;
         }
-        
+
         // Find the matching cookie
         SoupCookie* matchingCookie = nullptr;
         for (GList* l = cookies; l != nullptr; l = l->next) {
@@ -426,29 +426,30 @@ void CookieManager::deleteCookie(const std::string& url, const std::string& name
           const char* cookieName = soup_cookie_get_name(soupCookie);
           const char* cookieDomain = soup_cookie_get_domain(soupCookie);
           const char* cookiePath = soup_cookie_get_path(soupCookie);
-          
+
           if (cookieName != nullptr && strcmp(cookieName, ctx->name.c_str()) == 0) {
             // Check domain match (if specified)
-            bool domainMatch = ctx->domain.empty() ||
-                               (cookieDomain != nullptr && 
-                                (strcmp(cookieDomain, ctx->domain.c_str()) == 0 ||
-                                 // Also match with leading dot (e.g., ".example.com" matches "example.com")
-                                 (cookieDomain[0] == '.' && strcmp(cookieDomain + 1, ctx->domain.c_str()) == 0) ||
-                                 (ctx->domain[0] == '.' && strcmp(cookieDomain, ctx->domain.c_str() + 1) == 0)));
-            
+            bool domainMatch =
+                ctx->domain.empty() ||
+                (cookieDomain != nullptr &&
+                 (strcmp(cookieDomain, ctx->domain.c_str()) == 0 ||
+                  // Also match with leading dot (e.g., ".example.com" matches "example.com")
+                  (cookieDomain[0] == '.' && strcmp(cookieDomain + 1, ctx->domain.c_str()) == 0) ||
+                  (ctx->domain[0] == '.' && strcmp(cookieDomain, ctx->domain.c_str() + 1) == 0)));
+
             // Check path match (if not default)
-            bool pathMatch = ctx->path == "/" || 
+            bool pathMatch = ctx->path == "/" ||
                              (cookiePath != nullptr && strcmp(cookiePath, ctx->path.c_str()) == 0);
-            
+
             if (domainMatch && pathMatch) {
               matchingCookie = soup_cookie_copy(soupCookie);
               break;
             }
           }
         }
-        
+
         g_list_free_full(cookies, reinterpret_cast<GDestroyNotify>(soup_cookie_free));
-        
+
         if (matchingCookie == nullptr) {
           // Cookie not found - consider this a success (nothing to delete)
           (*(ctx->callback))(true);
@@ -456,29 +457,29 @@ void CookieManager::deleteCookie(const std::string& url, const std::string& name
           delete ctx;
           return;
         }
-        
+
         // Now delete the actual cookie with all its attributes
         webkit_cookie_manager_delete_cookie(
             ctx->manager, matchingCookie,
             nullptr,  // cancellable
             [](GObject* source, GAsyncResult* result, gpointer user_data) {
               auto* ctx = static_cast<DeleteContext*>(user_data);
-              
+
               GError* error = nullptr;
               gboolean success = webkit_cookie_manager_delete_cookie_finish(
                   WEBKIT_COOKIE_MANAGER(source), result, &error);
-              
+
               if (error != nullptr) {
                 errorLog(std::string("CookieManager: deleteCookie failed: ") + error->message);
                 g_error_free(error);
               }
-              
+
               (*(ctx->callback))(success);
               delete ctx->callback;
               delete ctx;
             },
             ctx);
-        
+
         soup_cookie_free(matchingCookie);
       },
       ctx);
@@ -532,10 +533,10 @@ void CookieManager::deleteCookies(const std::string& url, const std::string& dom
 }
 
 void CookieManager::deleteAllCookies(std::function<void(bool)> callback) {
-  // WPE WebKit 2.x uses NetworkSession API
-  WebKitNetworkSession* session = webkit_network_session_get_default();
+  // WebKitGTK 4.1：cookie 存储由 WebContext 的 WebsiteDataManager 管理
+  WebKitWebContext* context = webkit_web_context_get_default();
   WebKitWebsiteDataManager* manager =
-      session != nullptr ? webkit_network_session_get_website_data_manager(session) : nullptr;
+      context != nullptr ? webkit_web_context_get_website_data_manager(context) : nullptr;
 
   if (manager == nullptr) {
     callback(false);
@@ -582,8 +583,8 @@ void CookieManager::getAllCookies(std::function<void(std::vector<Cookie>)> callb
         auto* cb = static_cast<std::function<void(std::vector<Cookie>)>*>(user_data);
 
         GError* error = nullptr;
-        GList* cookies = webkit_cookie_manager_get_all_cookies_finish(
-            WEBKIT_COOKIE_MANAGER(source), result, &error);
+        GList* cookies = webkit_cookie_manager_get_all_cookies_finish(WEBKIT_COOKIE_MANAGER(source),
+                                                                      result, &error);
 
         std::vector<Cookie> cookieList;
 

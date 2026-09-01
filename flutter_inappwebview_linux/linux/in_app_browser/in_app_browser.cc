@@ -78,7 +78,6 @@ InAppBrowser::InAppBrowser(InAppBrowserManager* manager, FlBinaryMessenger* mess
   // Setup the window and components
   setupWindow(params);
   setupToolbar();
-  setupDrawingArea();
   setupWebView(params);
   applySettings();
 
@@ -326,100 +325,6 @@ void InAppBrowser::setupToolbar() {
   }
 }
 
-void InAppBrowser::setupDrawingArea() {
-#ifdef HAVE_WEBKIT_GTK
-  // WebKitGTK：webview widget 本身就是原生渲染者（含输入/IME/右键菜单），
-  // 无需 GL area/drawing area 中转；widget 由 setupWebView 挂载。
-  useGlRendering_ = false;
-  return;
-#else
-  // Try to use GtkGLArea for hardware-accelerated zero-copy rendering
-  // This provides better performance by avoiding GPU->CPU->GPU copies
-  bool canUseGl = InAppWebView::IsWpeWebKitAvailable();
-
-  if (canUseGl) {
-    // Create GtkGLArea for zero-copy EGL texture rendering
-    glArea_ = gtk_gl_area_new();
-    gtk_widget_set_can_focus(glArea_, TRUE);
-    gtk_widget_set_hexpand(glArea_, TRUE);
-    gtk_widget_set_vexpand(glArea_, TRUE);
-
-    // Use OpenGL ES for compatibility with WPE's EGL images
-    gtk_gl_area_set_use_es(GTK_GL_AREA(glArea_), TRUE);
-
-    // Enable events
-    gtk_widget_add_events(glArea_, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
-                                       GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK |
-                                       GDK_SMOOTH_SCROLL_MASK | GDK_KEY_PRESS_MASK |
-                                       GDK_KEY_RELEASE_MASK | GDK_FOCUS_CHANGE_MASK |
-                                       GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
-
-    // Connect GL-specific signals
-    g_signal_connect(glArea_, "realize", G_CALLBACK(OnGlAreaRealize), this);
-    g_signal_connect(glArea_, "render", G_CALLBACK(OnGlAreaRender), this);
-    g_signal_connect(glArea_, "resize", G_CALLBACK(OnGlAreaResize), this);
-
-    // Connect input signals (same as drawing area)
-    g_signal_connect(glArea_, "button-press-event", G_CALLBACK(OnDrawingAreaButtonPress), this);
-    g_signal_connect(glArea_, "button-release-event", G_CALLBACK(OnDrawingAreaButtonRelease), this);
-    g_signal_connect(glArea_, "motion-notify-event", G_CALLBACK(OnDrawingAreaMotionNotify), this);
-    g_signal_connect(glArea_, "scroll-event", G_CALLBACK(OnDrawingAreaScroll), this);
-    g_signal_connect(glArea_, "key-press-event", G_CALLBACK(OnDrawingAreaKeyPress), this);
-    g_signal_connect(glArea_, "key-release-event", G_CALLBACK(OnDrawingAreaKeyRelease), this);
-    g_signal_connect(glArea_, "focus-in-event", G_CALLBACK(OnDrawingAreaFocusIn), this);
-    g_signal_connect(glArea_, "focus-out-event", G_CALLBACK(OnDrawingAreaFocusOut), this);
-    g_signal_connect(glArea_, "enter-notify-event", G_CALLBACK(OnDrawingAreaEnterNotify), this);
-    g_signal_connect(glArea_, "leave-notify-event", G_CALLBACK(OnDrawingAreaLeaveNotify), this);
-    g_signal_connect(glArea_, "map", G_CALLBACK(OnDrawingAreaMap), this);
-    g_signal_connect(glArea_, "unmap", G_CALLBACK(OnDrawingAreaUnmap), this);
-    g_signal_connect(glArea_, "size-allocate", G_CALLBACK(OnGlAreaSizeAllocate), this);
-
-    gtk_box_pack_start(GTK_BOX(contentBox_), glArea_, TRUE, TRUE, 0);
-    useGlRendering_ = true;
-  } else {
-    // Fall back to original GtkDrawingArea implementation
-    setupDrawingAreaFallback();
-  }
-#endif  // HAVE_WEBKIT_GTK
-}
-
-void InAppBrowser::setupDrawingAreaFallback() {
-  // Original GtkDrawingArea code - used when GL rendering is not available
-  drawingArea_ = gtk_drawing_area_new();
-  gtk_widget_set_can_focus(drawingArea_, TRUE);
-  gtk_widget_set_hexpand(drawingArea_, TRUE);
-  gtk_widget_set_vexpand(drawingArea_, TRUE);
-
-  // Enable events
-  gtk_widget_add_events(drawingArea_, GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
-                                          GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK |
-                                          GDK_SMOOTH_SCROLL_MASK | GDK_KEY_PRESS_MASK |
-                                          GDK_KEY_RELEASE_MASK | GDK_FOCUS_CHANGE_MASK |
-                                          GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
-
-  // Connect signals
-  g_signal_connect(drawingArea_, "draw", G_CALLBACK(OnDrawingAreaDraw), this);
-  g_signal_connect(drawingArea_, "realize", G_CALLBACK(OnDrawingAreaRealize), this);
-  g_signal_connect(drawingArea_, "button-press-event", G_CALLBACK(OnDrawingAreaButtonPress), this);
-  g_signal_connect(drawingArea_, "button-release-event", G_CALLBACK(OnDrawingAreaButtonRelease),
-                   this);
-  g_signal_connect(drawingArea_, "motion-notify-event", G_CALLBACK(OnDrawingAreaMotionNotify),
-                   this);
-  g_signal_connect(drawingArea_, "scroll-event", G_CALLBACK(OnDrawingAreaScroll), this);
-  g_signal_connect(drawingArea_, "key-press-event", G_CALLBACK(OnDrawingAreaKeyPress), this);
-  g_signal_connect(drawingArea_, "key-release-event", G_CALLBACK(OnDrawingAreaKeyRelease), this);
-  g_signal_connect(drawingArea_, "size-allocate", G_CALLBACK(OnDrawingAreaSizeAllocate), this);
-  g_signal_connect(drawingArea_, "focus-in-event", G_CALLBACK(OnDrawingAreaFocusIn), this);
-  g_signal_connect(drawingArea_, "focus-out-event", G_CALLBACK(OnDrawingAreaFocusOut), this);
-  g_signal_connect(drawingArea_, "map", G_CALLBACK(OnDrawingAreaMap), this);
-  g_signal_connect(drawingArea_, "unmap", G_CALLBACK(OnDrawingAreaUnmap), this);
-  g_signal_connect(drawingArea_, "enter-notify-event", G_CALLBACK(OnDrawingAreaEnterNotify), this);
-  g_signal_connect(drawingArea_, "leave-notify-event", G_CALLBACK(OnDrawingAreaLeaveNotify), this);
-
-  gtk_box_pack_start(GTK_BOX(contentBox_), drawingArea_, TRUE, TRUE, 0);
-  useGlRendering_ = false;
-}
-
 void InAppBrowser::setupWebView(const InAppBrowserCreationParams& params) {
   if (messenger_ == nullptr || !FL_IS_BINARY_MESSENGER(messenger_)) {
     errorLog("InAppBrowser::setupWebView - messenger is null or invalid");
@@ -433,9 +338,7 @@ void InAppBrowser::setupWebView(const InAppBrowserCreationParams& params) {
   webViewParams.gtkWindow = window_;
   webViewParams.initialSettings = params.initialWebViewSettings;
   webViewParams.contextMenu = params.contextMenu;
-#ifdef HAVE_WEBKIT_GTK
   webViewParams.hostInBrowserWindow = true;
-#endif
 
   if (params.initialUserScripts.has_value()) {
     webViewParams.initialUserScripts = params.initialUserScripts.value();
@@ -462,12 +365,10 @@ void InAppBrowser::setupWebView(const InAppBrowserCreationParams& params) {
   // Set initial size (will be updated on realize)
   webView_->setSize(800, 600);
 
-#ifdef HAVE_WEBKIT_GTK
   // WebKitGTK：webview widget 直接挂载到浏览器窗口（原生渲染/输入/IME）。
   // 注意 widget 父容器唯一：browser 场景已跳过 InitGtkHost 离屏宿主。
   gtk_box_pack_start(GTK_BOX(contentBox_), GTK_WIDGET(webView_->webview()), TRUE, TRUE, 0);
   gtk_widget_show(GTK_WIDGET(webView_->webview()));
-#endif
 
   // Set up frame callback - uses GL queue_render for GPU path, scheduleFrame for CPU path
   webView_->SetOnFrameAvailable([this]() {
@@ -739,18 +640,6 @@ static int ConvertGdkModifiersToWpe(guint gdkState) {
   return wpeModifiers;
 }
 
-// Convert RGBA to BGRA for Cairo ARGB32 format (which is BGRA on little-endian)
-static void ConvertRGBAToBGRA(uint8_t* buffer, size_t size) {
-  // Process 4 bytes at a time (one pixel: RGBA -> BGRA)
-  for (size_t i = 0; i + 3 < size; i += 4) {
-    // Swap R and B channels
-    uint8_t r = buffer[i];
-    buffer[i] = buffer[i + 2];  // B
-    buffer[i + 2] = r;          // R
-    // G and A stay in place
-  }
-}
-
 // GTK Signal handlers
 
 void InAppBrowser::OnWindowDestroy(GtkWidget* widget, gpointer user_data) {
@@ -807,53 +696,6 @@ void InAppBrowser::OnUrlEntryActivated(GtkEntry* entry, gpointer user_data) {
       browser->webView_->loadUrl(url);
     }
   }
-}
-
-gboolean InAppBrowser::OnDrawingAreaDraw(GtkWidget* widget, cairo_t* cr, gpointer user_data) {
-  auto* browser = static_cast<InAppBrowser*>(user_data);
-  if (!browser || browser->destroyed_ || !browser->webView_) {
-    return FALSE;
-  }
-
-  // Get the pixel buffer from WebView
-  uint32_t width = 0, height = 0;
-  size_t bufferSize = browser->webView_->GetPixelBufferSize(&width, &height);
-
-  if (bufferSize == 0 || width == 0 || height == 0) {
-    // Fill with white background when no content
-    cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
-    cairo_paint(cr);
-    return TRUE;
-  }
-
-  // Allocate buffer and copy pixels
-  std::vector<uint8_t> buffer(bufferSize);
-  if (!browser->webView_->CopyPixelBufferTo(buffer.data(), bufferSize, &width, &height)) {
-    return FALSE;
-  }
-
-  // Convert RGBA to BGRA for Cairo
-  ConvertRGBAToBGRA(buffer.data(), bufferSize);
-
-  // Create Cairo surface from pixel buffer (BGRA format)
-  cairo_surface_t* surface = cairo_image_surface_create_for_data(buffer.data(), CAIRO_FORMAT_ARGB32,
-                                                                 width, height, width * 4);
-
-  if (cairo_surface_status(surface) == CAIRO_STATUS_SUCCESS) {
-    // Scale to fit drawing area
-    GtkAllocation alloc;
-    gtk_widget_get_allocation(widget, &alloc);
-
-    double scaleX = static_cast<double>(alloc.width) / width;
-    double scaleY = static_cast<double>(alloc.height) / height;
-
-    cairo_scale(cr, scaleX, scaleY);
-    cairo_set_source_surface(cr, surface, 0, 0);
-    cairo_paint(cr);
-  }
-
-  cairo_surface_destroy(surface);
-  return TRUE;
 }
 
 void InAppBrowser::OnDrawingAreaRealize(GtkWidget* widget, gpointer user_data) {
@@ -1231,58 +1073,9 @@ gboolean InAppBrowser::OnGlAreaRender(GtkGLArea* area, GdkGLContext* context, gp
 
   glViewport(0, 0, fbWidth, fbHeight);
 
-  // Try to get EGL image for zero-copy rendering
-  uint32_t imgWidth = 0, imgHeight = 0;
-  void* eglImage = browser->webView_->GetCurrentEglImage(&imgWidth, &imgHeight);
-
-  if (eglImage != nullptr && imgWidth > 0 && imgHeight > 0) {
-    // Get the glEGLImageTargetTexture2DOES function
-    static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES =
-        (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
-
-    if (glEGLImageTargetTexture2DOES != nullptr && browser->glProgram_ != 0) {
-      // Zero-copy path: bind EGL image directly as GL texture
-      glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_2D, browser->glTexture_);
-      glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, static_cast<GLeglImageOES>(eglImage));
-
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-      // Use shader program for rendering
-      glUseProgram(browser->glProgram_);
-      glUniform1i(browser->glUniformTexture_, 0);
-
-      // Bind VBO and set up vertex attributes (non-interleaved layout)
-      glBindBuffer(GL_ARRAY_BUFFER, browser->glVBO_);
-
-      // Position attribute: 2 floats, stride 0 (tightly packed), offset 0
-      glVertexAttribPointer(browser->glAttribPosition_, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
-      glEnableVertexAttribArray(browser->glAttribPosition_);
-
-      // Texture attribute: 2 floats, stride 0, offset = 4 positions * 2 floats = 8 floats
-      glVertexAttribPointer(browser->glAttribTexture_, 2, GL_FLOAT, GL_FALSE, 0,
-                            (void*)(8 * sizeof(GLfloat)));
-      glEnableVertexAttribArray(browser->glAttribTexture_);
-
-      // Draw fullscreen quad as triangle strip
-      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-      // Cleanup state
-      glDisableVertexAttribArray(browser->glAttribPosition_);
-      glDisableVertexAttribArray(browser->glAttribTexture_);
-      glBindBuffer(GL_ARRAY_BUFFER, 0);
-      glBindTexture(GL_TEXTURE_2D, 0);
-      glUseProgram(0);
-
-      return TRUE;
-    }
-  }
-
-  // Fallback: use pixel buffer rendering
-  return browser->RenderFromPixelBuffer(area);
+  // GTK 模式下 GL area 从未创建（widget 直接挂载原生渲染）；
+  // 此 handler 保留仅为静态链接完整性，实际不会触发。
+  return TRUE;
 }
 
 void InAppBrowser::OnGlAreaResize(GtkGLArea* area, gint width, gint height, gpointer user_data) {
@@ -1315,74 +1108,6 @@ void InAppBrowser::OnGlAreaSizeAllocate(GtkWidget* widget, GdkRectangle* allocat
       }
     }
   }
-}
-
-gboolean InAppBrowser::RenderFromPixelBuffer(GtkGLArea* area) {
-  // Fallback: upload pixel buffer to texture and render
-  // This handles SHM mode where EGL images aren't available
-
-  if (!webView_ || !glInitialized_ || glProgram_ == 0) {
-    return TRUE;  // Nothing to render, but handled
-  }
-
-  uint32_t width = 0, height = 0;
-  size_t bufferSize = webView_->GetPixelBufferSize(&width, &height);
-
-  if (bufferSize == 0 || width == 0 || height == 0) {
-    return TRUE;  // Nothing to render
-  }
-
-  std::vector<uint8_t> buffer(bufferSize);
-  if (!webView_->CopyPixelBufferTo(buffer.data(), bufferSize, &width, &height)) {
-    return FALSE;
-  }
-
-  // Get viewport dimensions - account for device scale factor
-  GtkAllocation alloc;
-  gtk_widget_get_allocation(GTK_WIDGET(area), &alloc);
-  gint scaleFactor = gtk_widget_get_scale_factor(GTK_WIDGET(area));
-  int fbWidth = alloc.width * scaleFactor;
-  int fbHeight = alloc.height * scaleFactor;
-
-  glViewport(0, 0, fbWidth, fbHeight);
-
-  // Upload pixel buffer to texture
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, glTexture_);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-               buffer.data());
-
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-  // Use shader program for rendering
-  glUseProgram(glProgram_);
-  glUniform1i(glUniformTexture_, 0);
-
-  // Bind VBO and set up vertex attributes (non-interleaved layout)
-  glBindBuffer(GL_ARRAY_BUFFER, glVBO_);
-
-  // Position attribute: 2 floats, stride 0 (tightly packed), offset 0
-  glVertexAttribPointer(glAttribPosition_, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
-  glEnableVertexAttribArray(glAttribPosition_);
-
-  // Texture attribute: 2 floats, stride 0, offset = 4 positions * 2 floats = 8 floats
-  glVertexAttribPointer(glAttribTexture_, 2, GL_FLOAT, GL_FALSE, 0, (void*)(8 * sizeof(GLfloat)));
-  glEnableVertexAttribArray(glAttribTexture_);
-
-  // Draw fullscreen quad as triangle strip
-  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-  // Cleanup state
-  glDisableVertexAttribArray(glAttribPosition_);
-  glDisableVertexAttribArray(glAttribTexture_);
-  glBindBuffer(GL_ARRAY_BUFFER, 0);
-  glBindTexture(GL_TEXTURE_2D, 0);
-  glUseProgram(0);
-
-  return TRUE;
 }
 
 void InAppBrowser::OnCursorChanged(const std::string& cursorName) {

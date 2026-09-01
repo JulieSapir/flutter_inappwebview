@@ -1,3 +1,30 @@
+## 0.3.0-beta.1
+
+- **移除 WPE WebKit 后端**：WebKitGTK 4.1 成为唯一后端。删除
+  `HAVE_WPE_PLATFORM` / `HAVE_WPE_BACKEND_LEGACY` 全部代码路径
+  （WPEPlatform/FDO 初始化、DMA-BUF/SHM 缓冲导出、backend resize 分支、
+  C 风格导出回调、WPEPlatform 设置应用、WPE 专属纹理类引用）；
+  CMake 移除后端开关与 WPE 依赖（wpe-webkit/libwpe/wayland-server），
+  仅保留 webkit2gtk-4.1（REQUIRED）
+- **移除 snapshot CPU 软渲染回退**：GPU 直通（XComposite + Damage +
+  EGLImage 零拷贝）成为唯一渲染管线。删除
+  `webkit_web_view_get_snapshot` 纹理管线（GtkOffscreenWindow 宿主、
+  50ms 节拍器、三缓冲 pixel_buffers、SIMD BGRA→RGBA 转换、
+  FlPixelBufferTexture）；能力检查不满足时显式报错（errorLog），不做
+  静默回退。`takeScreenshot` 改走 `webkit_web_view_get_snapshot` 异步
+  API（与纹理管线解耦，GPU 直通下同样可用）
+- `webkit_include.h` 收敛层重建：WebKitNetworkSession→WebKitWebContext、
+  WebKitRectangle→GdkRectangle、WebKitColor→GdkRGBA、
+  web_context_set_web_extensions_directory 命名差异（webkit2gtk-4.1 2.52 实测）
+- `InAppBrowser` 移除 GtkGLArea/GtkDrawingArea 渲染中转层残留（WPE 时代
+  像素/纹理回传路径），webview widget 直接挂浏览器窗口
+- 移除 WPE 时代的 VM 软渲染预检（`LIBGL_ALWAYS_SOFTWARE` 自动注入），
+  GPU 能力由 `WebKitGpuCapture::IsSupported` 显式探测
+- 实测回归（:0，GPU 直通，webkit2gtk-4.1 2.52.3）：编译通过；GPU capture
+  激活、首帧 `repaint-complete` 干净交付；10 步 resize 步进 present size
+  全程跟踪、终态全宽渲染无脏块；右键菜单正常弹出、多次操作零 SIGSEGV；
+  fps 打点正常（页面动画率 35-49fps）
+
 ## 0.2.0-beta.3
 
 - 修复初次载入时 webview 显示未初始化显存噪声（脏帧）：

@@ -117,8 +117,9 @@ class InAppWebViewSettings {
   bool enable2DCanvasAcceleration = true;  // Performance
   bool allowModalDialogs = true;
 
-  // === WPE Platform settings ===
-  // These settings use the WPE Platform API (available when HAVE_WPE_PLATFORM is defined)
+  // === WPE Platform settings（通道协议兼容字段）===
+  // 以下字段随 Dart 侧设置协议解析保留；Web 模式偏好等仅 WPE Platform API
+  // 可应用，WebKitGTK 下无对应 API，为 no-op。
   std::optional<bool> darkMode;            // Dark mode for websites (prefers-color-scheme)
   std::optional<bool> disableAnimations;   // Reduce motion for accessibility
   std::optional<bool> fontAntialias;       // Font antialiasing
@@ -163,17 +164,9 @@ class InAppWebViewSettings {
   ~InAppWebViewSettings();
 
   /**
-   * Apply these settings to a WPE WebKitWebView.
+   * Apply these settings to a WebKitWebView.
    */
   void applyToWebView(WebKitWebView* webview) const;
-
-#ifdef HAVE_WPE_PLATFORM
-  /**
-   * Apply WPE Platform settings using the WPE Settings API.
-   * @param display The WPE display to get settings from
-   */
-  void applyWpePlatformSettings(void* display) const;
-#endif
 
   /**
    * Convert to FlValue map.

@@ -2,6 +2,91 @@
 
 > 本文件由维护 agent 写入，供下次接手时快速恢复上下文。
 
+## 2026-08-31 交付：移除 WPE 后端 + 移除 snapshot CPU 软渲染回退（GPU 直通唯一管线）
+
+### 决策与范围（用户拍板）
+
+- Wayland 环境的疑虑由 XWayland 化解：GPU 直通三条件（X11 + XComposite/XDamage +
+  EGL_KHR_image_pixmap/DRI3）在 XWayland 下由 mesa 满足，预期可用（未实测，见遗留）
+- 用户决策：**GPU 直通为唯一渲染管线，能力不满足显式报错，不做任何回退**
+  （与「不做回退处理，失败显式报错」红线一致）；snapshot CPU 软渲染
+  （50ms 节拍器 19fps 永动机）与 WPE 后端一并移除
+
+### 完成内容（~2600 行死代码清除，`flutter_inappwebview_linux/linux/`）
+
+1. **CMakeLists.txt 重写**（516→237 行）：删后端开关与 WPE 探测
+   （wpe-webkit/wpe-platform/wpebackend-fdo/libwpe/wayland-server）、删 SIMD
+   编译段（simd_convert 已无消费者）、删 WPE 库打包逻辑；源列表去
+   `inappwebview_texture.cc`/`software_rendering.cc`，GPU 三件套
+   （in_app_webview_gtk/webkit_gpu_capture/inappwebview_gpu_texture）无条件编译
+2. **in_app_webview.cc/h**（8226→~5500 行）：删全部 `HAVE_WPE_PLATFORM`/
+   `HAVE_WPE_BACKEND_LEGACY` 分支与 `HAVE_WEBKIT_GTK` 守卫（解包为唯一路径）——
+   InitWpeBackend/InitWebView WPE 分支、析构 WPE 关停序列、OnFrameDisplayed/
+   OnExportDmaBuf/OnExportShmBuffer/OnWpePlatformBufferRendered/ReadPixelsFromEglImage、
+   三缓冲 pixel*buffers/swap 索引、egl_display* 读回上下文、
+   GetPixelBufferSize/CopyPixelBufferTo/HasDmaBufExport/GetDmaBufFd/
+   GetCurrentEglImage/SetSkipPixelReadback、50ms 节拍器（StartSnapshotTicker/
+   OnSnapshotTick）、monitor 刷新率机制（SetupMonitorChangeHandlers 等 3 函数）、
+   PreflightDmaBufSupport、输入分发 WPE 分支（指针/滚轮/键盘/触摸 5 方法只留 GTK）
+3. **in_app_webview_gtk.cc**：InitGtkHost GPU 唯一化（GtkOffscreenWindow 宿主
+   分支删除，能力不满足仍建 popup 宿主但 errorLog 显式报错）；删 OnSnapshotReady/
+   DeliverSnapshot/snapshot*pending*/dirty\_；RequestSnapshot 收敛为 PresentOnce
+   强制补帧入口（方法名保留复用调用点）
+4. **custom_platform_view.cc/h**：纹理唯一路径 GPU capture 纹理；删
+   inappwebview_texture/inappwebview_egl_texture 引用、UseGLTexture 环境探测、
+   EGL image 回填逻辑；捕获未激活时 errorLog + 纹理 populate 显式失败
+5. **in_app_browser.cc/h**：删 setupDrawingArea/GtkGLArea 渲染中转层、
+   OnDrawingAreaDraw/RenderFromPixelBuffer（GetPixelBufferSize 死引用源头）、
+   ConvertRGBAToBGRA；OnGlAreaRender 的 EGL 分支改显式空转（handler 级遗留，见下）
+6. **settings.cc/h**：删 applyWpePlatformSettings（WPE Settings API）；WPE 平台
+   设置字段（darkMode/fontDPI 等）保留为通道协议兼容 no-op 并注释说明
+7. **webkit_include.h 收敛层重建**（首个编译错误的根因）：上轮清理时删过头——
+   webkit2gtk-4.1（2.52）API 面需要宏映射：WebKitNetworkSession→WebKitWebContext
+   （get_network_session→get_context/new_ephemeral/cookie_manager/website_data
+   \_manager/set_proxy_settings/allow_tls_certificate_for_host）、WebKitRectangle→
+   GdkRectangle、WebKitColor→GdkRGBA、set_web_process_extensions_directory→
+   set_web_extensions_directory
+8. **flutter_inappwebview_linux_plugin.cc**：删 WPE 时代 VM 软渲染预检
+   （ApplySoftwareRenderingIfNeeded 调用与 include）
+9. **文档**：LINUX_BACKEND.md 重写（52 行，GPU 直通唯一管线 + 修订记录）；
+   CHANGELOG 0.3.0-beta.1；pubspec description WPE→WebKitGTK（版本号沿用仓库
+   惯例未 bump，CHANGELOG 与 pubspec 本就不同步）
+
+### 待用户删除的孤儿文件（按「删除由用户执行」规则未动）
+
+```bash
+cd flutter_inappwebview_linux/linux
+rm in_app_webview/inappwebview_texture.cc in_app_webview/inappwebview_texture.h \
+   in_app_webview/inappwebview_egl_texture.cc in_app_webview/inappwebview_egl_texture.h \
+   in_app_webview/simd_convert.h utils/software_rendering.cc utils/software_rendering.h
+rm ../WPE_BACKEND.md
+```
+
+（已确认无任何引用；CMake 源列表已剔除）
+
+### 验证（:0 真实 X，GPU 直通，webkit2gtk-4.1 2.52.3，重建后二进制）
+
+- `flutter build linux --debug` 通过（收敛层重建后一次通过）
+- 运行时日志：`GPU direct capture active`；首帧 `repaint-complete 1280x204`
+  （477ms，800x600 阶段零放行）；fps 打点正常（页面动画率 35-49fps）
+- resize 回归：10 步步进（65ms 间隔）`present size` 全程跟踪（960→1550x204，
+  960 是 Flutter 布局重排中间态非 bug），终态 1550x720 全宽渲染干净无脏块
+- 右键回归：菜单正常弹出（Back/Forward/Stop/Reload/Inspect Element），
+  多次右键零 SIGSEGV；鼠标事件确认送达 webview（点击后 fetch 事件时间吻合）
+- **排坑记录（下次直接抄）**：xdotool 自动化验证时 `windowactivate` 会让 WM
+  移动窗口，几何必须**点击前实时** `getwindowgeometry --shell` 获取；用旧值
+  点击会连续落空（本次前 4 次右键"菜单未弹"全是这个原因，非回归）
+
+### 遗留事项
+
+- [ ] XWayland 下 GPU 直通实测（override-redirect popup 屏外定位行为待验证）
+- [ ] in*app_browser.cc 的 OnDrawingArea*/OnGlArea* 输入 handler 与 glArea*/
+      glProgram\_ 等 GL 成员为不接线的死代码（编译无害），下次可整体切除
+- [ ] in*app_browser.h 的 drawingArea*/useGlRendering*/frameSourceId* 同上
+- [ ] 孤儿文件删除（见上，等用户执行）
+- [ ] 此前遗留（IME 中文输入验证/InAppBrowser 运行时验证/触摸注入/
+      WebResourceErrorType 契约补映射）不变
+
 ## 2026-08-31 修复：拖拽 resize 冻结（每步几何变化重置等待 → 20 步拖拽 1.2s 零帧）
 
 ### RCA（present size 时间线实证）

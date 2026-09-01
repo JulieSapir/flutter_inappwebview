@@ -24,7 +24,7 @@ ProxyRule::ProxyRule(FlValue* map) {
   }
 
   url = get_fl_map_value<std::string>(map, "url", "");
-  
+
   // Check for schemeFilter - it may be a map with "rawValue" or a direct value
   FlValue* schemeFilterValue = get_fl_map_value_raw(map, "schemeFilter");
   if (schemeFilterValue != nullptr) {
@@ -63,8 +63,7 @@ ProxySettings::ProxySettings(FlValue* map) {
 // === ProxyManager ===
 
 ProxyManager::ProxyManager(PluginInstance* plugin)
-    : ChannelDelegate(plugin->messenger(), METHOD_CHANNEL_NAME),
-      plugin_(plugin) {}
+    : ChannelDelegate(plugin->messenger(), METHOD_CHANNEL_NAME), plugin_(plugin) {}
 
 ProxyManager::~ProxyManager() {
   debugLog("dealloc ProxyManager");
@@ -96,9 +95,9 @@ void ProxyManager::HandleMethodCall(FlMethodCall* method_call) {
 }
 
 void ProxyManager::setProxyOverride(const ProxySettings& settings) {
-  WebKitNetworkSession* session = webkit_network_session_get_default();
-  if (session == nullptr) {
-    errorLog("ProxyManager: Failed to get default network session");
+  WebKitWebContext* context = webkit_web_context_get_default();
+  if (context == nullptr) {
+    errorLog("ProxyManager: Failed to get default web context");
     return;
   }
 
@@ -173,28 +172,30 @@ void ProxyManager::setProxyOverride(const ProxySettings& settings) {
 
   // Add scheme-specific proxies
   for (const auto& entry : schemeSpecificProxyRules) {
-    webkit_network_proxy_settings_add_proxy_for_scheme(
-        proxySettings, entry.first.c_str(), entry.second.c_str());
+    webkit_network_proxy_settings_add_proxy_for_scheme(proxySettings, entry.first.c_str(),
+                                                       entry.second.c_str());
   }
 
-  // Apply the proxy settings to the session
-  webkit_network_session_set_proxy_settings(
-      session, WEBKIT_NETWORK_PROXY_MODE_CUSTOM, proxySettings);
+  // Apply the proxy settings to the context's website data manager
+  webkit_website_data_manager_set_network_proxy_settings(
+      webkit_web_context_get_website_data_manager(context), WEBKIT_NETWORK_PROXY_MODE_CUSTOM,
+      proxySettings);
 
   // Free the proxy settings
   webkit_network_proxy_settings_free(proxySettings);
 }
 
 void ProxyManager::clearProxyOverride() {
-  WebKitNetworkSession* session = webkit_network_session_get_default();
-  if (session == nullptr) {
-    errorLog("ProxyManager: Failed to get default network session");
+  WebKitWebContext* context = webkit_web_context_get_default();
+  if (context == nullptr) {
+    errorLog("ProxyManager: Failed to get default web context");
     return;
   }
 
   // Revert to system default proxy settings
-  webkit_network_session_set_proxy_settings(
-      session, WEBKIT_NETWORK_PROXY_MODE_DEFAULT, nullptr);
+  webkit_website_data_manager_set_network_proxy_settings(
+      webkit_web_context_get_website_data_manager(context), WEBKIT_NETWORK_PROXY_MODE_DEFAULT,
+      nullptr);
 }
 
 }  // namespace flutter_inappwebview_plugin

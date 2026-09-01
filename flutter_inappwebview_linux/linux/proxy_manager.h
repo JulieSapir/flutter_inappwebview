@@ -41,7 +41,7 @@ struct ProxySettings {
 
 /**
  * Manages proxy settings for WPE WebKit.
- * Uses WebKitNetworkProxySettings and WebKitNetworkSession for proxy configuration.
+ * Uses WebKitNetworkProxySettings and WebKitWebContext for proxy configuration.
  */
 class ProxyManager : public ChannelDelegate {
  public:
