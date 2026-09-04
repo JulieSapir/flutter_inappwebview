@@ -1857,6 +1857,8 @@ void InAppWebView::setScaleFactor(double scale_factor) {
 // === Activity State Management (like Cog browser) ===
 
 void InAppWebView::setFocused(bool focused) {
+  debugLog("InAppWebView: setFocused(" + std::to_string(focused) + ") current_is_focused=" +
+           std::to_string(is_focused_));
   if (focused == is_focused_)
     return;
   is_focused_ = focused;
@@ -1870,6 +1872,11 @@ void InAppWebView::setFocused(bool focused) {
     gtk_widget_grab_focus(GTK_WIDGET(webview_));
   }
   // 失焦：GTK 无显式 unfocus API，焦点由宿主窗口焦点流处理
+
+  // 显式补发 GDK_FOCUS_CHANGE：grab_focus 在离屏 popup 宿主下不会向
+  // WebKitWebView 投递 focus-in/out 事件（实测零到达），caret 绘制依赖的
+  // ViewIsFocused 状态拉不起来，必须由合成层补链路（详见 GtkSetFocused）。
+  GtkSetFocused(focused);
 }
 
 void InAppWebView::setVisible(bool visible) {

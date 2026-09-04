@@ -110,6 +110,22 @@ void InAppWebView::InitGtkHost() {
   // 保证可聚焦（grab_focus 前置条件）
   gtk_widget_set_can_focus(GTK_WIDGET(webview_), TRUE);
 
+  // 焦点取证：WebKit 的 caret 绘制依赖 focus-in/out 到达 WebKitWebView
+  // （ViewIsFocused activity state）。离屏 popup 宿主不持有 X toplevel focus，
+  // GTK 内部 focus widget 状态是唯一驱动力，打点观测链路是否接通。
+  g_signal_connect(webview_, "focus-in-event",
+                   G_CALLBACK(+[](GtkWidget*, GdkEventFocus*, gpointer) {
+                     debugLog("InAppWebView(gtk): WebKit focus-in-event received");
+                     return FALSE;
+                   }),
+                   nullptr);
+  g_signal_connect(webview_, "focus-out-event",
+                   G_CALLBACK(+[](GtkWidget*, GdkEventFocus*, gpointer) {
+                     debugLog("InAppWebView(gtk): WebKit focus-out-event received");
+                     return FALSE;
+                   }),
+                   nullptr);
+
   // 尺寸分配：WebKit layout viewport 必须与 Flutter 纹理逻辑尺寸一致。
   // 关键点（RCA 实证）：宿主从 map 到屏幕前 GTK 布局轮不会自动跑，必须直接
   // size_allocate 宿主窗口本身，让 GtkBin 的正常分配链路把尺寸传导给 webview。
@@ -348,16 +364,55 @@ void InAppWebView::GtkSetScrollDelta(double dx, double dy) {
     return;
   }
 
+  // 单位还原（RCA：页面滑动过快）：
+  //
+  // 1) Flutter engine（fl_scrolling_manager.cc）把 GDK scroll delta 乘
+  //    kScrollOffsetMultiplier(53) * scale_factor 后发给 Dart（物理像素单位）；
+  //    GDK_SCROLL_SMOOTH 事件的 delta 是 GDK 原生单位，WebKit 按内部步长换算，
+  //    像素值原样回填会被再次换算（旧实现滚轮一格滚 ~2120px，即 53*40 双重放大）。
+  //
+  // 2) WebKitGTK SMOOTH delta→px 步长（原生标尺页实测标定，2026-09-04）：
+  //      视口 204 高：delta 1.0 → 34px（= 204/6）
+  //      视口 320 高：delta 1.0 → 46px（≈ 320/7，充分收敛后复测一致）
+  //    拟合 pxPerUnit = max(34, H/7)（H = 逻辑视口高）。两点定线存在外推
+  //    不确定性（±10% 量级），远优于修复前的 53 倍放大；后续如需精化可再标定。
+  //
+  // 目标语义：与 Flutter 桌面其他应用一致——滚轮一格 53 逻辑像素、触控板
+  // panDelta 1px:1px（Dart 侧 panDelta 与 scrollDelta 同像素语义，统一换算）。
+  const double scale = scale_factor_ > 0 ? scale_factor_ : 1.0;
+  const double viewport_h = height_ > 0 ? static_cast<double>(height_) : 204.0;
+  const double px_per_unit = viewport_h > 238.0 ? viewport_h / 7.0 : 34.0;
+  const double gdk_delta_per_px = 1.0 / (scale * px_per_unit);
+
   GdkEventScroll* ev = reinterpret_cast<GdkEventScroll*>(gdk_event_new(GDK_SCROLL));
   ev->send_event = FALSE;
   ev->time = static_cast<guint32>(g_get_monotonic_time() / 1000);
   ev->x = cursor_x_;
   ev->y = cursor_y_;
   ev->direction = GDK_SCROLL_SMOOTH;
-  ev->delta_x = dx;
-  ev->delta_y = dy;
+  ev->delta_x = dx * gdk_delta_per_px;
+  ev->delta_y = dy * gdk_delta_per_px;
   ev->state = DartModifiersToGdk(current_modifiers_);
   GtkSetEventDevice(reinterpret_cast<GdkEvent*>(ev), false);
+  DispatchGdkEvent(reinterpret_cast<GdkEvent*>(ev));
+}
+
+void InAppWebView::GtkSetFocused(bool focused) {
+  if (webview_ == nullptr) {
+    return;
+  }
+
+  // 焦点事件补链路（RCA：输入框 caret 不显示）：离屏 popup 宿主永不持有
+  // X toplevel focus，gtk_widget_grab_focus 只更新 GTK 内部 focus widget
+  // 状态，不会向 WebKitWebView 投递 GDK_FOCUS_CHANGE（focus-in/out 事件
+  // 实测零到达），WebKit 的 ViewIsFocused activity state 拉不起来 → caret
+  // 不绘制。键盘事件不走 focus 通道所以输入仍有效，形成“能输入但无光
+  // 标”。显式合成 focus 事件（与其他合成输入同模式）；WebKitGTK 内部
+  // isFocused 状态有幂等保护，重复投递无害。
+  GdkEventFocus* ev = reinterpret_cast<GdkEventFocus*>(gdk_event_new(GDK_FOCUS_CHANGE));
+  ev->send_event = FALSE;
+  ev->in = focused ? TRUE : FALSE;
+  GtkSetEventDevice(reinterpret_cast<GdkEvent*>(ev), true);
   DispatchGdkEvent(reinterpret_cast<GdkEvent*>(ev));
 }
 

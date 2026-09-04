@@ -81,8 +81,8 @@ enum class WpePointerEventKind {
   Cancel = 6
 };
 
-// Pointer button type (matches Dart side)
-enum class WpePointerButton { None = 0, Primary = 1, Secondary = 2, Tertiary = 3 };
+// (WpePointerButton 死枚举已删除：零使用，且 None 与 X11/X.h 的
+//  "#define None 0L" 宏冲突，示例链路重编时触发 expected identifier)
 
 /// InAppWebView - WPE WebKit based implementation
 ///
@@ -536,7 +536,10 @@ class InAppWebView {
   bool waiting_fullscreen_notify_ = false;
 
   // Activity/focus state
-  bool is_focused_ = true;
+  // is_focused_ 初始 false（对齐 WebKitGTK 实际状态）：WebKit 收到 focus-in
+  // 前 ViewIsFocused 不成立；若初始为 true，首个 setFocused(true) 会被幂等
+  // 保护吞掉，焦点链路永不启动（caret 不显示）。
+  bool is_focused_ = false;
   bool is_visible_ = true;
 
   // Target refresh rate (0 = default)
@@ -583,6 +586,7 @@ class InAppWebView {
   void GtkSetPointerButton(int kind, int button, int clickCount);
   void GtkSetScrollDelta(double dx, double dy);
   void GtkSendKeyEvent(int type, int64_t keyCode, int scanCode, uint32_t modifiers);
+  void GtkSetFocused(bool focused);
   void GtkSendTouchEvent(int type, int id, double x, double y,
                          const std::vector<std::tuple<int, double, double, int>>& touchPoints);
 

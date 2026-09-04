@@ -2,6 +2,75 @@
 
 > 本文件由维护 agent 写入，供下次接手时快速恢复上下文。
 
+## 2026-09-04 修复：Linux 滚动过快（双重单位换算）+ 输入框 caret 不显示（focus 链路断裂）
+
+### Bug 1：页面滑动过快（RCA + 标定）
+
+- **双重换算根因**：Flutter engine `fl_scrolling_manager.cc` 已把 GDK scroll
+  delta 乘 `kScrollOffsetMultiplier(53) * scale_factor` 转像素再发给 Dart；
+  旧 `GtkSetScrollDelta` 把该像素值原样回填 `GDK_SCROLL_SMOOTH` 事件，WebKit
+  再按内部步长换算 → 滚轮一格 ~2120px（53 倍过快）。engine 测试断言
+  `EXPECT_EQ(scroll_delta, 53 * delta)` 是铁证来源
+- **WebKitGTK SMOOTH 步长标定**（标尺页 `scroll_ruler.html` 40px 刻度 +
+  scrollY 读数，本机 GPU 直通环境）：视口 204 高 delta 1.0 → 34px
+  （=204/6）；320 高 → 46px（=320/7，350ms 间隔与 1.8s 充分收敛协议结果
+  一致，排除动画截断）。两点拟合 `pxPerUnit = max(34, H/7)`，**非线性于
+  视口**、也与 pixelsPerLineStep(40) 假设不符——不实测拍脑袋的换算常数
+  全是错的
+- **修复**：`delta = flutter_px / (scale_factor × max(34, H/7))`，目标
+  Flutter 桌面语义（滚轮一格 53 逻辑 px、panDelta 1:1）
+- **终验**：滚轮 1 格 scrollY 0→**53**（xdotool click 5 + 截图读标尺）
+- 原生 WebKitGTK 对照程序（python gi + xdotool）确认 discrete 滚轮步长
+  另有一套（22.7px@204 / 55px@408 视口），我们以 Flutter 语义为准而非对
+  齐 WebKit discrete；macOS（AppKitView 原生视图）与 Windows（120/notch
+  语义一致）无同类问题
+
+### Bug 2：输入框 caret 不显示（"能输入但无光标"）
+
+- **取证**：debug 打点（focus-in-event 信号 + setFocused 入口）+ 运行
+  example：启动序列 `setFocused(1)` 执行（grab_focus 已调）但
+  **focus-in-event 零到达**
+- **根因**：离屏 popup 宿主（override-redirect，屏外）永不持有 X toplevel
+  focus，`gtk_widget_grab_focus` 只更新 GTK 内部 focus widget 状态、不向
+  WebKitWebView 投递 GDK_FOCUS_CHANGE；WebKit ViewIsFocused 拉不起来 →
+  caret 不绘制。键盘事件不走 focus 通道所以输入有效——与症状完全吻合
+- **修复**：新增 `GtkSetFocused(bool)` 显式合成 GDK_FOCUS_CHANGE 事件
+  （DispatchGdkEvent 同模式投递，`GdkEventFocus` 仅 4 字段：type/window/
+  send_event/in）；`is_focused_` 初始 true→false（避免首个 setFocused(true)
+  被幂等保护吞掉，启动序列第一个事件是 setFocused(false) 的场景实测存在）
+- **终验**：点击 input → focus 高亮边框 + 末尾闪烁 caret + "caret-test"
+  输入成功（截图实证）；日志出现 `WebKit focus-in-event received`
+
+### 顺手清除
+
+- 死枚举 `WpePointerButton`（零使用；`None` 撞 X11/X.h `#define None 0L`
+  宏，example 链路重编时报 `expected identifier`——本次构建被它炸出）
+
+### 方法论沉淀（下次直接抄）
+
+- **滚轮/输入自动化协议**：窗口几何必须用 `xwininfo -id` 的 Absolute 值
+  （`xdotool getwindowgeometry` 含 WM frame 偏移，本机差 10/40px，点击全
+  落空）；`xdotool type` 会把后续参数当文本吞掉（必须单独调用）；
+  `windowactivate` 后再取几何（WM 可能移窗，老教训）
+- **pgrep 自匹配坑**：`pgrep -f X` 会匹配到包含 X 字样自己的 bash -c，加
+  `| grep -v pgrep | grep -v "bash -c"` 过滤或用 process 名
+- **标定优先于源码考古**：WebKitGTK 滚动换算的源码路径已重构（GitHub 上
+  ScrollAnimatorGtk.cpp 404、code search 要登录），两轮 ctypes 注入
+  （gdk_event_put / gtk_widget_event 均 handled=False，疑似 no-window
+  widget 路由限制）全失败——直接在真机上用标尺页 + xdotool 实测三点定
+  标，20 分钟收工
+- **PyGObject 裸指针**：`c_void_p.from_address(id(obj) + 16)`（instance
+  在 PyObject 头后）；合成 GDK 事件填 window 指针前必须 `g_object_ref`
+  （GDK 拥有约定，free 时 unref，否则 CRITICAL）
+
+### 遗留事项
+
+- [ ] 滚动换算第三标定点（视口 >400 高）未做，`max(34, H/7)` 外推 ±10%
+      不确定性（example 布局 webview 高度封顶 ~320，需自定义页面验证）
+- [ ] HiDPI（scale_factor=2）下滚动换算未实测（公式已含 scale 项）
+- [ ] 此前遗留（IME 中文输入验证/InAppBrowser 运行时验证/触摸注入/
+      WebResourceErrorType 契约补映射/孤儿文件删除）不变
+
 ## 2026-08-31 交付：移除 WPE 后端 + 移除 snapshot CPU 软渲染回退（GPU 直通唯一管线）
 
 ### 决策与范围（用户拍板）

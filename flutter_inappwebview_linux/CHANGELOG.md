@@ -1,3 +1,30 @@
+## 0.3.0-beta.2
+
+- **修复页面滚动过快**：`GtkSetScrollDelta` 存在双重单位换算——Flutter
+  engine（`fl_scrolling_manager.cc`）已将 GDK scroll delta 乘
+  `kScrollOffsetMultiplier(53) * scale_factor` 转为物理像素，原样回填
+  `GDK_SCROLL_SMOOTH` 事件后被 WebKit 再次按内部步长换算（滚轮一格实测
+  ~2120px）。改为 `delta = px / (scale_factor × max(34, H/7))` 归一（
+  WebKitGTK SMOOTH 步长按标尺页实测标定：视口 204 高 34px/单位、320 高
+  46px/单位，两点拟合 `max(34, H/7)`，±10% 外推不确定性）。终验：滚轮
+  一格精确滚动 53px，与 Flutter 桌面语义一致；触控板 `panDelta` 同像素
+  语义统一换算
+- **修复输入框 caret（光标）不显示**：离屏 popup 宿主永不持有 X toplevel
+  focus，`gtk_widget_grab_focus` 只更新 GTK 内部 focus widget 状态，不会向
+  WebKitWebView 投递 `GDK_FOCUS_CHANGE`（focus-in 事件实测零到达），WebKit
+  的 ViewIsFocused 拉不起来 → caret 不绘制；键盘事件不走 focus 通道所以
+  输入仍有效，形成"能输入但无光标"。新增 `GtkSetFocused` 显式合成 focus
+  事件补链路（与其他合成输入同模式，WebKitGTK 内部 isFocused 幂等）；
+  `is_focused_` 初始值 true→false 对齐 WebKit 实际状态（避免首个
+  setFocused(true) 被幂等保护吞掉）。终验：点击 input 出现 focus 高亮与
+  闪烁 caret，文字输入正常
+- 删除死枚举 `WpePointerButton`（零使用，且 `None` 与 X11/X.h 的
+  `#define None 0L` 宏冲突，链路重编时报 expected identifier）
+- 新增 debug 取证打点：WebKit focus-in/out 事件与 `setFocused` 调用日志
+  （仅 debug 构建），供焦点链路问题排查
+- example 新增测试资产：`scroll_ruler.html`（40px 刻度滚动标尺）、
+  `input_focus_test.html`（focus/caret 测试页）
+
 ## 0.3.0-beta.1
 
 - **移除 WPE WebKit 后端**：WebKitGTK 4.1 成为唯一后端。删除

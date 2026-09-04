@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  html { scroll-behavior: auto; }
+  body { margin: 0; }
+  /* 40px 一格刻度：WebKitGTK smooth scroll 1 行单位 = Scrollbar::pixelsPerLineStep()=40px。
+     滚轮 1 格若修复正确应精确滚 1 格刻度。 */
+  .ruler { height: 8000px; background: repeating-linear-gradient(
+      to bottom, #2196f3 0px, #2196f3 2px, transparent 2px, transparent 40px); }
+  .marker { position: fixed; top: 0; left: 0; right: 0; height: 40px;
+      background: rgba(255,0,0,0.15); pointer-events: none; }
+  .label { position: fixed; top: 2px; left: 4px; font: 14px monospace;
+      background: #fff; padding: 1px 4px; }
+</style>
+</head>
+<body>
+  <div class="marker"></div>
+  <div class="label" id="label">scrollY=0</div>
+  <div class="ruler"></div>
+  <script>
+    var label = document.getElementById('label');
+    function upd() { label.textContent = 'scrollY=' + Math.round(window.scrollY); }
+    window.addEventListener('scroll', upd, {passive: true});
+    upd();
+  </script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body { font-size: 18px; margin: 20px; }
+  input { font-size: 18px; padding: 8px; width: 300px; }
+</style>
+</head>
+<body>
+  <h1>Focus / Caret Test</h1>
+  <p>Click the input below and type. Caret should blink.</p>
+  <input id="test-input" type="text" placeholder="type here">
+  <p id="status">focused: no</p>
+  <script>
+    var input = document.getElementById('test-input');
+    var status = document.getElementById('status');
+    function update() { status.textContent = 'focused: ' + document.hasFocus(); }
+    input.addEventListener('focus', function() { update(); setTimeout(update, 0); });
+    input.addEventListener('blur', function() { update(); setTimeout(update, 0); });
+    input.addEventListener('input', function(e) {
+      status.textContent = 'focused: ' + document.hasFocus() + ' len=' + input.value.length;
+    });
+    update();
+  </script>
+</body>
+</html>
