@@ -1842,6 +1842,8 @@ void InAppWebView::setSize(int width, int height) {
       int anchor_x = 0, anchor_y = 0;
       HostAnchorPosition(&anchor_x, &anchor_y);
       gdk_window_move_resize(host_gdk, anchor_x, anchor_y, width_, height_);
+      // 重钉改变了宿主根原点，IME 补偿 delta 需重算
+      RefreshImFixRegistration();
     }
   }
   // resize 后强制补帧（重取当前内容别名并入队）
@@ -2008,6 +2010,9 @@ bool InAppWebView::OnDomFullscreenRequest(bool fullscreen) {
 void InAppWebView::SetTextureOffset(double x, double y) {
   texture_offset_x_ = x;
   texture_offset_y_ = y;
+  // 视口在 Flutter 窗口内偏移变化 → IME 补偿 delta 精确化（首次上报把
+  // offset=0 的粗注册替换为精确值，见 RefreshImFixRegistration）
+  RefreshImFixRegistration();
 }
 
 void InAppWebView::SetCursorPos(double x, double y) {

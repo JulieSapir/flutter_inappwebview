@@ -28,9 +28,12 @@
 #include <X11/Xlib.h>
 #include <X11/extensions/shape.h>  // 宿主 XShape bounding/input 全空（屏内隐形）
 
+#include <cmath>
 #include <memory>
+#include <sstream>
 
 #include "../utils/log.h"
+#include "im_fix.h"
 #include "in_app_webview.h"
 #include "webkit_gpu_capture.h"
 
@@ -148,6 +151,72 @@ void HostAnchorPosition(int* x, int* y) {
 
 // === 离屏宿主生命周期 ===
 
+namespace {
+// 递归收集宿主窗口树（宿主 + 子孙）中全部 native X11 窗口的 XID，
+// 逐个注册到 im_fix 补偿表（WebKit 输入法的 client window 是 WebView
+// 主 GdkWindow，popup 类子窗口一并注册以覆盖菜单/dnd 等依赖根坐标的路径）。
+void CollectTreeXids(GdkWindow* win, void* owner, int dx, int dy) {
+  if (win == nullptr) {
+    return;
+  }
+  if (GDK_IS_X11_WINDOW(win)) {
+    vai_imfix_register(owner, gdk_x11_window_get_xid(win), dx, dy);
+  }
+  for (GList* l = gdk_window_peek_children(win); l != nullptr; l = l->next) {
+    CollectTreeXids(GDK_WINDOW(l->data), owner, dx, dy);
+  }
+}
+}  // namespace
+
+// IME 根坐标补偿注册（详释见 im_fix.h）：宿主锚点在显示器右下角内侧 1x1，
+// client window（WebKitWebView 的 GdkWindow）根坐标与用户视觉位置脱节，
+// fcitx5 按后者画候选框 → 漂移到屏幕右下角（真实桌面截图实锤）。
+// delta = (Flutter 窗口根原点 + webview 视口在窗口内偏移) - 宿主根原点。
+// 先注销再取 origin：hook 命中条件是 XID 在表内，注销后拿到的才是真值。
+void InAppWebView::RefreshImFixRegistration() {
+  if (gtk_host_window_ == nullptr) {
+    return;
+  }
+  GdkWindow* host_gdk = gtk_widget_get_window(GTK_WIDGET(gtk_host_window_));
+  if (host_gdk == nullptr || !GDK_IS_X11_WINDOW(host_gdk)) {
+    return;
+  }
+  vai_imfix_unregister_owner(this);
+
+  GdkWindow* fl_gdk =
+      gtk_window_ != nullptr
+          ? gtk_widget_get_window(GTK_WIDGET(gtk_window_))
+          : nullptr;
+  if (fl_gdk == nullptr || !GDK_IS_X11_WINDOW(fl_gdk)) {
+    // Flutter 窗口未 map：期望根坐标不可得，保持注销（宁可候选框落在
+    // 宿主锚点，也不补偿到错误位置）
+    return;
+  }
+
+  int host_x = 0, host_y = 0;
+  gdk_window_get_origin(host_gdk, &host_x, &host_y);
+  int fl_x = 0, fl_y = 0;
+  gdk_window_get_origin(fl_gdk, &fl_x, &fl_y);
+
+  const int scale = gtk_widget_get_scale_factor(GTK_WIDGET(gtk_window_));
+  const int desired_x =
+      fl_x + static_cast<int>(lround(texture_offset_x_ * scale));
+  const int desired_y =
+      fl_y + static_cast<int>(lround(texture_offset_y_ * scale));
+  const int dx = desired_x - host_x;
+  const int dy = desired_y - host_y;
+
+  CollectTreeXids(host_gdk, this, dx, dy);
+  {
+    std::ostringstream oss;
+    oss << "InAppWebView(gtk): imfix registered delta=(" << dx << "," << dy
+        << ") host=(" << host_x << "," << host_y << ") fl=(" << fl_x << ","
+        << fl_y << ") offset=(" << texture_offset_x_ << ","
+        << texture_offset_y_ << ")";
+    debugLog(oss.str());
+  }
+}
+
 void InAppWebView::InitGtkHost() {
   if (webview_ == nullptr) {
     return;
@@ -225,8 +294,9 @@ void InAppWebView::InitGtkHost() {
     // innerWidth < 0 → SYNC FAIL，探针实测 -2816）；手动 XComposite redirect
     // 无法阻止 muffin 类合成器绘制 OR 窗口（XShape 是 server 端 clip，
     // 两条输出路径均有效）。
-    HideHostWindow(host_gdk);
-  }
+    HideHostWindow(host_gdk);    // 宿主树 XID 注册（首帧 Dart 视口偏移未到，先按 offset=0 注册；
+    // setTextureOffset 到达后立即精确化，见 RefreshImFixRegistration）
+    RefreshImFixRegistration();  }
 
   // 宿主就绪后启动捕获（redirect + damage 源 + 首帧别名）。
   // 帧输出回调在纹理注册后由 AttachGpuCaptureOutput 接线；此前 damage 只计数。
@@ -262,6 +332,16 @@ void InAppWebView::InitGtkHost() {
                              self->scale_factor_ = static_cast<double>(new_scale);
                            }
                            self->RequestSnapshot();
+                         }),
+                         this);
+    // Flutter 窗口移动/缩放（configure-event）：宿主根原点与 Flutter 窗口根
+    // 原点的相对关系变化，IME 补偿 delta 需重算。方法通道侧布局变化
+    // （setTextureOffset）与宿主重钉（setSize）各自触发 refresh。
+    gtk_window_configure_handler_id_ =
+        g_signal_connect(gtk_window_, "configure-event",
+                         G_CALLBACK(+[](GtkWindow*, GdkEventConfigure*, gpointer user_data) -> gboolean {
+                           static_cast<InAppWebView*>(user_data)->RefreshImFixRegistration();
+                           return FALSE;
                          }),
                          this);
   }
@@ -306,6 +386,12 @@ void InAppWebView::ShutdownGtkHost() {
     g_signal_handler_disconnect(gtk_window_, gtk_window_scale_handler_id_);
     gtk_window_scale_handler_id_ = 0;
   }
+  if (gtk_window_configure_handler_id_ != 0 && gtk_window_ != nullptr) {
+    g_signal_handler_disconnect(gtk_window_, gtk_window_configure_handler_id_);
+    gtk_window_configure_handler_id_ = 0;
+  }
+  // 先注销 IME 补偿注册再销毁宿主：防止 XID 被系统复用后误命中补偿表
+  vai_imfix_unregister_owner(this);
   if (gtk_host_window_ != nullptr) {
     // 窗口销毁会连带销毁 webview widget（容器持有），webview_ 的 GObject
     // 引用随后在析构函数中 unref 释放

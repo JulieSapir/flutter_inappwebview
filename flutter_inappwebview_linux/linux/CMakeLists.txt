@@ -80,6 +80,7 @@ list(APPEND PLUGIN_SOURCES
   "in_app_webview/custom_platform_view.cc"
   "in_app_webview/in_app_webview.cc"
   "in_app_webview/in_app_webview_gtk.cc"
+  "in_app_webview/im_fix.cc"
   "in_app_webview/in_app_webview_settings.cc"
   "in_app_webview/user_content_controller.cc"
   "in_app_webview/webview_channel_delegate.cc"

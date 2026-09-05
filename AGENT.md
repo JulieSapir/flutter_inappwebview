@@ -2,6 +2,86 @@
 
 > 本文件由维护 agent 写入，供下次接手时快速恢复上下文。
 
+## 2026-09-06 修复：IME 候选框漂移（离屏宿主根坐标语义，Xlib 层坐标补偿）
+
+### 症状与根因（全链源码实锤）
+
+- 客诉（真实桌面截图）：网页输入框打拼音，preedit 正常显示在光标处（内容渲染路径
+  不受影响），但 **fcitx5 候选框出现在屏幕右下角**（宿主锚点区域），远离视觉光标。
+- 定位链（逐级读源码）：
+  1. WebKit `InputMethodFilterGtk::platformTransformCursorRectToViewCoordinates`
+     把 caret rect 平移后经 `webkit_input_method_context_notify_cursor_area`
+     交给 IM context（语义：相对 client window）
+  2. client window = `gtk_widget_get_window(WebKitWebView)` = 离屏 OR 宿主的
+     子窗口（GPU 直通架构既定形态）
+  3. fcitx5-gtk3 `fcitximcontext.cpp:983`：上报候选框位置前调
+     `gdk_window_get_root_coords(client_window, ...)` → daemon 在该根坐标画候选框
+- client window 根坐标 = 宿主锚点（显示器右下角内侧 1x1，screenX 修复的既定
+  定位）→ 候选框必然漂移。同根受影响语义：GTK 菜单弹出、dnd 根坐标等一切
+  "宿主树 → 根"换算。
+
+### 方案：Xlib 层符号覆盖 + XID 注册表补偿（im_fix.cc/.h 新增）
+
+- `XTranslateCoordinates` 覆盖定义在插件源码内（Flutter Linux 插件是 SHARED 库
+  `libflutter_inappwebview_linux_plugin.so`，为 exe 的 DT_NEEDED，位于 fcitx
+  im module（运行时 dlopen）的符号查找路径中且先于 libgdk 命中——注入实验实证）。
+  RTLD_NEXT 调真函数；仅对"已注册宿主树 XID → 根窗口"的换算加 delta：
+  `delta = (Flutter 窗口根原点 + webview 视口窗口内偏移×scale) - 宿主根原点`
+- 注册表：per-owner（每 WebView 实例）+ per-XID；表空时一次原子读直通（零开销
+  快路径）。互斥锁保护（GPU capture 独立 X 连接线程可能并发进入）。
+- 调试开关：`VAI_IMFIX_DEBUG=1`（constructor 读 env）打印注册/命中/补偿值。
+
+### delta 数据流（触发点全覆盖）
+
+- `RefreshImFixRegistration()`（in_app_webview_gtk.cc）：先 unregister（保证
+  随后 gdk_window_get_origin 拿到未补偿真值）→ 重算 delta → 递归收集宿主树
+  XID（gdk_window_peek_children）注册
+- 触发点：InitGtkHost（宿主 map 后，offset=0 粗注册）/ SetTextureOffset
+  （Dart 布局变化上报，**复用现有 setTextureOffset 通道，零新协议**）/
+  InAppWebView::setSize（宿主重钉后）/ gtk_window_ "configure-event"
+  （Flutter 窗口移动缩放）/ ShutdownGtkHost（先注销再销毁，防 XID 复用误命中）
+
+### 注入要求（显式依赖，非可选）
+
+- **hook 符号必须显式 `__attribute__((visibility("default")))` 导出**（XTranslateCoordinates
+  定义处已加）。坑实锤：本插件 CMake 设了 `CXX_VISIBILITY_PRESET hidden`，同名覆盖符号
+  默认被打成 .symtab 局部符号（nm 显示小写 t），**不进 .dynsym**——fcitx 的调用全部
+  解析到真 libX11，补偿从未生效（v1 交付漏检 .dynsym，用户实测候选框仍漂移后定位）。
+  检查命令：`nm -D libflutter_inappwebview_linux_plugin.so | grep XTranslateCoordinates`
+  必须输出大写 `T`。
+- 宿主应用 exe 无需任何改动；vai 的 linux runner 已加 `-rdynamic`
+  （linux/runner/CMakeLists.txt）作为静态链接形态宿主的兜底——该形态必须导出本符号，
+  否则 im_fix 不生效（文档化，不做静默降级）。
+
+### 验证证据
+
+- **v1 交付的重大教训**：注入三连实验的 hook 编在实验 exe（-rdynamic）里，与真实
+  形态（插件 so 内 hidden 预设）不一致，验证结论被推翻——hidden 预设下 hook 从未
+  命中，用户实测（release bundle）候选框仍漂移在右下角。验证形态必须等于部署形态。
+- **v2 修复后证据链**（release bundle，2026-09-06）：
+  1. `nm -D` 两个构建形态 hook 均为 .dynsym 导出（大写 T）
+  2. `LD_DEBUG=bindings` 实锤主进程内 `binding file libgdk-3.so.0 to
+     libflutter_inappwebview_linux_plugin.so: XTranslateCoordinates`——fcitx 实际
+     路径（fcitximcontext → gdk_window_get_root_coords → libgdk 内部 X 层调用）
+     命中 hook；WebKit WebProcess/NetworkProcess 子进程不链接插件 so、不命中
+     （正确，IME 归 UI 进程）
+  3. 运行日志补偿计算正确：`translate xid=0x20001d (1599,999) -> (0,88)
+     delta=(-1599,-911)`（锚点(1599,999) − 视口偏移(0,88)，Xvfb 1600x1000 单屏）
+  4. probe.so（dlopen 注入、遍历窗口树直调 X 层）**不命中**——glibc 对 dlopen
+     模块的带版本引用跳过 unversioned 定义（probe NEEDED libX11 记录版本，插件
+     hook 无版本段）。这不影响 fcitx 真实路径（其 X 层调用发生在 libgdk 内部，
+     属 global scope 成员，命中已由 LD_DEBUG 实证）；但意味着**任何"dlopen 模块
+     直调 XTranslateCoordinates"的场景不覆盖**，未来若 fcitx/Xlib 调用方变为
+     此形态需重估 hook 点
+- v1 运行时数值（仍有效）：Xvfb :99 与真实桌面 :0 双环境 `imfix registered`
+  日志 delta 均与手算吻合（:0：host=(2559,1599) fl=(50,112) offset=(0,88~90) →
+  delta=(-2509,-1397~1399)）；页面 focus 链路经测试页服务端 REPORT 实证
+- 待用户终验：修复后 release bundle（或 debug bundle）测试页
+  （tools/imtest_server.py:18090）输入框打拼音，候选框应出现在输入框旁而非
+  屏幕右下角
+- 已知边界：fork 键盘路由缺陷使 Xvfb 全自动 e2e 无法打字（原有已知缺陷，非本次
+  引入）；Wayland 路径不涉及（X11 专属修复）
+
 ## 2026-09-05 修复：window.screenX 屏外负坐标（testufo SYNC FAILURE 客诉）
 
 ### 症状与取证

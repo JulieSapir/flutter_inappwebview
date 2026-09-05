@@ -256,6 +256,11 @@ class InAppWebView {
 
   // Input handling
   void SetTextureOffset(double x, double y);
+
+  // IME 根坐标补偿（im_fix）：注册宿主窗口树 XID 并维护 delta，使输入法
+  // 候选框/GTK 菜单等“宿主树 → 根”换算结果等于用户视觉上的真实位置。
+  // 仅 X11 离屏宿主路径有意义，其它后端为空实现或无调用。
+  void RefreshImFixRegistration();
   void SetCursorPos(double x, double y);
   void SetPointerButton(int kind, int button, int clickCount = 1);
   void SetScrollDelta(double dx, double dy);
@@ -442,6 +447,7 @@ class InAppWebView {
   // GTK signal handlers
   gulong gtk_scale_handler_id_ = 0;         // notify::scale-factor on the webview widget
   gulong gtk_window_scale_handler_id_ = 0;  // notify::scale-factor on the gtk window
+  gulong gtk_window_configure_handler_id_ = 0;  // configure-event on the gtk window (IME delta refresh)
 
   // View dimensions
   int width_ = 800;
