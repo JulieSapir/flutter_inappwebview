@@ -3,9 +3,15 @@
 // 渲染管线（GPU 直通，唯一路径）:
 //   WebKit 合成 → webview 原生 X 窗口（GPU）→ XComposite redirect pixmap
 //   → EGLImage 导入 → FlTextureGL 纹理 → Flutter 采样。零 CPU 像素搬运。
-//   宿主为 override-redirect 的 GTK_WINDOW_POPUP（屏外定位），帧驱动为
-//   XDamage 事件（独立 X 连接）。实现在 webkit_gpu_capture.cc。
-//   能力不满足时显式报错，不做回退（无 CPU 软渲染路径）。
+//   宿主为 override-redirect 的 GTK_WINDOW_POPUP（屏内原点定位，XShape
+//   bounding/input 全空隐形），帧驱动为 XDamage 事件（独立 X 连接）。实现在
+//   webkit_gpu_capture.cc。能力不满足时显式报错，不做回退（无 CPU 软渲染路径）。
+//
+// 宿主定位（屏内原点 0,0）:
+//   WebKitGTK 用宿主 GdkWindow 原点实现 window.screenX/screenY；屏外负坐标
+//   会让 testufo 等站点误判"窗口不在主显示器"（screenX + innerWidth < 0 →
+//   SYNC FAIL，刷新率测试永久卡死，探针实测 screenX=-2816）。可见性由
+//   手动 XShape 全空 clip 保证；输入穿透由 input shape 清空保证。
 //
 // 输入桥：
 //   Flutter 指针/滚轮/键盘事件 → 合成 GdkEvent（逻辑坐标）
@@ -19,6 +25,8 @@
 
 #include <gdk/gdk.h>
 #include <gdk/gdkx.h>  // GDK_IS_X11_WINDOW（GPU 直通宿主 X 窗口钉位）
+#include <X11/Xlib.h>
+#include <X11/extensions/shape.h>  // 宿主 XShape bounding/input 全空（屏内隐形）
 
 #include <memory>
 
@@ -29,7 +37,55 @@
 namespace flutter_inappwebview_plugin {
 
 namespace {
-
+// 宿主屏内锚点：origin=(0,0) 显示器的右下角内侧 1x1。
+//
+// 背景 RCA：WebKitGTK 用宿主 GdkWindow 原点实现 window.screenX/screenY，
+// 原方案屏外负定位使 testufo 等站点误判"窗口不在主显示器"（screenX +
+// innerWidth < 0 → SYNC FAIL，探针实测 -2816）。但窗口在屏内 mapped 时
+// muffin 类合成器必绘制 OR 窗口（最小复现实证：红/蓝 OR 窗口均可见，
+// XShape bounding/input 全空后合成器仍无视 shape 画矩形）。
+//
+// 权衡：锚点取 (x + w - 1, y + h - 1)，宿主几何仍为全尺寸（WebKit
+// viewport/捕获管线不受位置影响），仅右下角 1x1 落在屏内，直接输出
+// 路径由 XShape 全空 clip 归零，合成器路径最坏 1px 像素（可接受）。
+//
+// 为何选 origin=0 的显示器：testufo 判定用全局坐标对比 screen.width
+// （窗口所在屏宽），仅当屏 origin=(0,0) 时 screenX=宽-1 才 < 宽；
+// 单屏/主屏在左布局时即主屏，副屏在左布局时选左侧屏（testufo 仍通过）。
+// 无 monitor 信息时退 (0,0) 并报错（宁可大块可见，不可 SYNC FAIL）。
+void HostAnchorPositionImpl(int* x, int* y) {
+  GdkDisplay* display = gdk_display_get_default();
+  GdkMonitor* chosen = nullptr;
+  if (display != nullptr) {
+    const int n = gdk_display_get_n_monitors(display);
+    for (int i = 0; i < n && chosen == nullptr; i++) {
+      GdkMonitor* m = gdk_display_get_monitor(display, i);
+      GdkRectangle g = {0, 0, 0, 0};
+      if (m != nullptr) {
+        gdk_monitor_get_geometry(m, &g);
+        if (g.x == 0 && g.y == 0 && g.width > 0 && g.height > 0) {
+          chosen = m;
+        }
+      }
+    }
+    if (chosen == nullptr) {
+      chosen = gdk_display_get_primary_monitor(display);
+    }
+    if (chosen == nullptr && gdk_display_get_n_monitors(display) > 0) {
+      chosen = gdk_display_get_monitor(display, 0);
+    }
+  }
+  if (chosen == nullptr) {
+    errorLog("InAppWebView(gtk): no monitor geometry; host anchored at (0,0)");
+    *x = 0;
+    *y = 0;
+    return;
+  }
+  GdkRectangle g = {0, 0, 0, 0};
+  gdk_monitor_get_geometry(chosen, &g);
+  *x = g.x + g.width - 1;
+  *y = g.y + g.height - 1;
+}
 // Dart/WPE 修饰键位序：Control=1, Shift=2, Alt=4, Meta=8
 // GDK 掩码：SHIFT=1<<0, CONTROL=1<<2, MOD1(Alt)=1<<3, META=1<<28
 inline guint DartModifiersToGdk(uint32_t mods) {
@@ -83,6 +139,13 @@ void GtkSetEventDevice(GdkEvent* event, bool keyboard) {
 
 }  // namespace
 
+// 头文件声明的公开定义（不能进匿名命名空间，否则与声明歧义）。
+// 宿主屏内锚点：origin=(0,0) 显示器右下角内侧 1x1， rationale 见
+// HostAnchorPositionImpl 上方注释。
+void HostAnchorPosition(int* x, int* y) {
+  HostAnchorPositionImpl(x, y);
+}
+
 // === 离屏宿主生命周期 ===
 
 void InAppWebView::InitGtkHost() {
@@ -100,11 +163,16 @@ void InAppWebView::InitGtkHost() {
         "Composite/Damage + EGL_KHR_image_pixmap); no rendering output will be available");
   }
 
-  // override-redirect popup 定位到完全屏外：XComposite 捕获需要真实原生
-  // X 窗口，GTK3 离屏宿主不产生 X 窗口（探针实证：窗口树中无 webview 窗口）。
-  // 坐标取 -(2*尺寸+256)，任意窗口尺寸均落在 X11 16-bit 坐标界内且不可见。
+  // override-redirect popup 定位到屏内右下角 1x1 锚点：XComposite 捕获需要
+  // 真实原生 X 窗口，GTK3 未 map 宿主不产生 X 窗口（探针实证：窗口树中无
+  // webview 窗口）。屏内定位原因：宿主 GdkWindow 原点即 window.screenX/Y，
+  // 屏外负坐标会让 testufo 等站点误判窗口不在主显示器（screenX + innerWidth
+  // < 0 恒成立 → SYNC FAIL）。屏内可见性/输入由 map 后的 XShape 全空 +
+  // input shape 清空保证（见下方），合成器路径最坏 1px 像素。
   gtk_host_window_ = GTK_WINDOW(gtk_window_new(GTK_WINDOW_POPUP));
-  gtk_window_move(gtk_host_window_, -(2 * width_ + 256), -(2 * height_ + 256));
+  int anchor_x = 0, anchor_y = 0;
+  HostAnchorPosition(&anchor_x, &anchor_y);
+  gtk_window_move(gtk_host_window_, anchor_x, anchor_y);
   gtk_container_add(GTK_CONTAINER(gtk_host_window_), GTK_WIDGET(webview_));
 
   // 保证可聚焦（grab_focus 前置条件）
@@ -143,10 +211,21 @@ void InAppWebView::InitGtkHost() {
   // 期间 X 窗口停在 GTK 默认 800x600——Start 捕获的几何错误，且该阶段 WebKit
   // 未绘制，backing 全是未初始化显存。popup 宿主完全走 gdk 路径（同 setSize
   // 的单写入者原则）：gdk_window_move_resize 直接发 XConfigureWindow，服务端
-  // 立即生效，顺带重钉屏外定位。
+  // 立即生效，顺带重钉屏内锚点定位。
   GdkWindow* host_gdk = gtk_widget_get_window(GTK_WIDGET(gtk_host_window_));
   if (host_gdk != nullptr && GDK_IS_X11_WINDOW(host_gdk)) {
-    gdk_window_move_resize(host_gdk, -(2 * width_ + 256), -(2 * height_ + 256), width_, height_);
+    HostAnchorPosition(&anchor_x, &anchor_y);
+    gdk_window_move_resize(host_gdk, anchor_x, anchor_y, width_, height_);
+    // input shape 清空：屏内 override-redirect 窗口不参与 X 输入命中，真实
+    // 鼠标/键盘事件穿透到下层窗口；Flutter 侧输入走 gtk_widget_event 直接
+    // 派发，不依赖 X 命中，不受影响。空 region（非 NULL）才是清空语义。
+    // 屏内隐形：XShape bounding/input 全空（同 input shape 一次设置）。
+    // 屏外定位的替代方案：WebKitGTK 的 window.screenX/screenY 取宿主原点，
+    // 屏外负坐标会让 testufo 等站点误判"窗口不在主显示器"（screenX +
+    // innerWidth < 0 → SYNC FAIL，探针实测 -2816）；手动 XComposite redirect
+    // 无法阻止 muffin 类合成器绘制 OR 窗口（XShape 是 server 端 clip，
+    // 两条输出路径均有效）。
+    HideHostWindow(host_gdk);
   }
 
   // 宿主就绪后启动捕获（redirect + damage 源 + 首帧别名）。
@@ -188,6 +267,29 @@ void InAppWebView::InitGtkHost() {
   }
 
   RequestSnapshot();
+}
+
+void InAppWebView::HideHostWindow(GdkWindow* host_gdk) {
+  if (!GDK_IS_X11_WINDOW(host_gdk)) {
+    return;
+  }
+  Display* dpy = GDK_WINDOW_XDISPLAY(host_gdk);
+  Window win = gdk_x11_window_get_xid(host_gdk);
+  int ev_base = 0, err_base = 0;
+  if (!XShapeQueryExtension(dpy, &ev_base, &err_base)) {
+    errorLog("InAppWebView(gtk): XShape missing; host window may be visible on screen");
+    return;
+  }
+  // bounding+input 全空：所有输出路径（X 直接输出/合成器绘制）均被
+  // server 端 clip，零像素上屏；screenX/Y 等 geometry 语义不受影响。
+  // input region 与 bounding 一并置空，OR 窗口不吃任何 X 输入命中。
+  // （XCreateRegion() 返回空 region；GTK 不会在 resize 时重置 shape，
+  // 设一次终身有效。）
+  Region empty = XCreateRegion();
+  XShapeCombineRegion(dpy, win, ShapeBounding, 0, 0, empty, ShapeSet);
+  XShapeCombineRegion(dpy, win, ShapeInput, 0, 0, empty, ShapeSet);
+  XDestroyRegion(empty);
+  debugLog("InAppWebView(gtk): host window clipped invisible (XShape empty)");
 }
 
 void InAppWebView::ShutdownGtkHost() {

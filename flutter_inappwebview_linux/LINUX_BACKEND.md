@@ -14,7 +14,7 @@ flutter_inappwebview_linux 使用唯一后端 **WebKitGTK（webkit2gtk-4.1）**�
 | InAppWebView widget 渲染 | **GPU 直通（唯一管线）**：XComposite redirect + Damage 驱动 + `NameWindowPixmap` 别名 + `EGL_KHR_image_pixmap` 零拷贝导入引擎纹理。无 CPU 软渲染回退，能力不满足时显式报错 |
 | 帧驱动                   | XDamage 事件驱动（页面变才出帧，实测跟随页面更新率直至刷新率上限）；resize/scale 变化后由 `PresentOnce` 强制补帧                                                           |
 | 输入                     | Flutter 指针/滚轮/键盘事件合成 GdkEvent → `gtk_widget_event()`                                                                                                             |
-| 离屏宿主                 | override-redirect popup 定位屏外（需真实 X 窗口供捕获）                                                                                                                    |
+| 离屏宿主                 | override-redirect popup 定位屏内锚点（origin=0 显示器右下角内侧 1x1；需真实 X 窗口供捕获）。屏内定位保证 `window.screenX/screenY` 语义正确——屏外负坐标会让 testufo 等站点误判"窗口不在主显示器"报 SYNC FAILURE。隐形：XShape bounding/input 全空（直接输出路径零像素；muffin 类合成器无视 shape，最坏绘制 1px） |
 | InAppBrowser             | webview widget 直接挂入浏览器窗口（原生渲染/输入/IME，无纹理中转）                                                                                                         |
 | Headless                 | 复用离屏宿主，不注册纹理                                                                                                                                                   |
 

@@ -4,9 +4,9 @@
 // InAppWebView implementation (WebKitGTK).
 //
 // 渲染采用 GPU 直通唯一管线（webkit_gpu_capture.*）：widget 挂 override-redirect
-// 屏外 popup 宿主，XComposite redirect + XDamage 驱动 + EGLImage 零拷贝。
-// 输入合成 GdkEvent（实现见 in_app_webview_gtk.cc）。无 CPU 回退管线：
-// 能力不满足时显式报错。
+// 屏内原点 popup 宿主（手动 XComposite redirect 保证不可见），XDamage 驱动 +
+// EGLImage 零拷贝。输入合成 GdkEvent（实现见 in_app_webview_gtk.cc）。
+// 无 CPU 回退管线：能力不满足时显式报错。
 
 #include <flutter_linux/flutter_linux.h>
 
@@ -37,6 +37,10 @@
 #include "in_app_webview_settings.h"
 
 namespace flutter_inappwebview_plugin {
+
+// 宿主屏内锚点：origin=(0,0) 显示器右下角内侧 1x1（详见
+// in_app_webview_gtk.cc 内注释）。实现于 in_app_webview_gtk.cc。
+void HostAnchorPosition(int* x, int* y);
 
 class InAppBrowser;
 class InAppWebViewManager;
@@ -424,8 +428,11 @@ class InAppWebView {
   WebKitWebView* webview_ = nullptr;
 
   // === 离屏宿主与 GPU 直通 ===
-  // override-redirect popup 宿主（屏外定位）：XComposite 捕获需要真实原生
-  // X 窗口，GTK3 离屏宿主不产生 X 窗口。
+  // override-redirect popup 宿主（屏内原点定位）：XComposite 捕获需要真实原生
+  // X 窗口，GTK3 未 map 宿主不产生 X 窗口。宿主 GdkWindow 原点是 WebKitGTK
+  // window.screenX/screenY 的取值来源，必须落在真实屏幕内，否则依赖该
+  // 语义的站点（testufo 刷新率测试等）会误判"窗口不在主显示器"。
+  // 屏内隐形用 XShape bounding/input 全空保证（见 HideHostWindow）。
   GtkWindow* gtk_host_window_ = nullptr;
 
   // GPU 直通捕获（XComposite redirect + EGLImage 零拷贝）。构造时能力检查
@@ -571,10 +578,16 @@ class InAppWebView {
 
   // === WebKitGTK backend methods (implemented in in_app_webview_gtk.cc) ===
   // Creates the offscreen host window, mounts the widget and realizes it.
-  // 创建屏外 popup 宿主并启动 XComposite 捕获（GPU 直通唯一管线）。
+  // 创建屏内原点 popup 宿主（手动 redirect 隐形 + input shape 输入穿透）
+  // 并启动 XComposite 捕获（GPU 直通唯一管线）。
   void InitGtkHost();
   // Destroys the offscreen host window (must run before webview_ is unref'ed).
   void ShutdownGtkHost();
+  // 宿主 X 窗口 XShape bounding/input 全空：屏内定位后唯一隐形保证。
+  // X server 端强制 clip，直接输出（无合成器）与合成器绘制（muffin 画 OR
+  // 窗口）两条路径均不产生像素；geometry 不变，screenX 语义不受影响。
+  // 扩展缺失显式报错不回退。
+  void HideHostWindow(GdkWindow* host_gdk);
   // GPU 直通强制补帧入口（resize/scale 变化后重取当前内容别名并入队）。
   // 方法名保留以复用历史调用点。
   void RequestSnapshot();

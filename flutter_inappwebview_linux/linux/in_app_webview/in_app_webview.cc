@@ -1834,10 +1834,14 @@ void InAppWebView::setSize(int width, int height) {
     // gtk_window_resize 依赖 GTK 异步 size 机器，与手动 size_allocate 存在竞态
     // ——GTK 见 allocation 已等于请求值会跳过 XResizeWindow，宿主卡在旧尺寸
     // （交互式连续 resize 时必现）。直接对 GdkWindow 下发 move_resize 确定生效
-    // （单一写入者），并顺带重钉屏外定位（尺寸变大时右下角可能进入屏幕）。
+    // （单一写入者），并顺带重钉屏内锚点定位（宿主 GdkWindow 原点是
+    // window.screenX/screenY 的取值来源，必须保持屏内；尺寸超出屏幕的
+    // 部分由 X 裁剪，不影响 testufo 的主屏判定）。
     GdkWindow* host_gdk = gtk_widget_get_window(GTK_WIDGET(gtk_host_window_));
     if (host_gdk != nullptr) {
-      gdk_window_move_resize(host_gdk, -(2 * width_ + 256), -(2 * height_ + 256), width_, height_);
+      int anchor_x = 0, anchor_y = 0;
+      HostAnchorPosition(&anchor_x, &anchor_y);
+      gdk_window_move_resize(host_gdk, anchor_x, anchor_y, width_, height_);
     }
   }
   // resize 后强制补帧（重取当前内容别名并入队）

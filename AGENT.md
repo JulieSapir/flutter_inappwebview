@@ -2,6 +2,78 @@
 
 > 本文件由维护 agent 写入，供下次接手时快速恢复上下文。
 
+## 2026-09-05 修复：window.screenX 屏外负坐标（testufo SYNC FAILURE 客诉）
+
+### 症状与取证
+
+- testufo.com/refreshrate 在 vai 中永久卡 "Calculating Hz..." + 红条
+  `SYNC FAILURE: Move all apps and browser windows to primary monitor #1.`
+  （真实桌面截图客诉，Chrome 同页正常）
+- testufo 判定条件（bbarea187-new.js 反混淆）：`(windowX + innerWidth < 0)
+  || (windowX + innerHeight < 0) || (windowX > screen.width) ||
+  (windowY > screen.height)` 任一成立 → SYNCFAIL，停止 Hz 计算
+- 探针实锤（tools/screen_probe_server.py 上报 window.screenX/Y）：
+  修复前 `screenX=-2816, screenY=-1520`，与
+  `gtk_window_move(host, -(2*W+256), -(2*H+256))` 逐字节吻合；
+  `screenX + innerWidth = -1536 < 0` → SYNC FAIL 恒成立
+
+### 根因
+
+WebKitGTK 用宿主 GdkWindow 原点实现 window.screenX/screenY。离屏 popup
+宿主定位屏外负坐标 → 任何页面读到的 screenX 都是负大数 → testufo 误判
+"窗口不在主显示器"。所有依赖该语义的站点受影响，不止 testufo。
+
+### 方案迭代（两次推翻，全部有实验数据）
+
+1. 屏内 (0,0) + 宿主手动 XCompositeRedirectWindow(Manual)：编译运行后
+   root 截图发现 (0,0) 大块 webview 内容直接上屏——muffin 合成器绘制 OR
+   窗口，redirect 不改变其合成绘制（muffin 从 redirect pixmap 取内容照画）。
+   方案作废
+2. XShape bounding/input 全空：最小复现程序（OR 窗口 A 红/B 蓝，B 设
+   XShape 空）在 :99（muffin 合成）下红蓝都可见；`xwininfo -shape` 实证
+   B 的 `shape extents: 0x0`（server 端已生效）——muffin 合成绘制无视
+   XShape。XShape 仅对无合成器的 X 直接输出路径有效。单靠它不行
+3. 最终方案：屏内锚点（origin=0 显示器右下角内侧 1x1）+ XShape 保留：
+   - 差分实验实锤 WebKitGTK 2.52 screenX/Y 语义：窗口与 monitor 相交 →
+     返回该 monitor geometry 原点（窗口挪 (100,100)/(800,400)/(1599,999)
+     三点均报 0）；完全屏外 → 退回窗口负坐标（-2816 实证）。故锚点与屏
+     相交即恒过 testufo 判定（screenX=monitor.x < screen.width 恒成立）
+   - 宿主几何仍为全尺寸（WebKit viewport/捕获管线不受位置影响），仅
+     (W-1, H-1) 1x1 落在屏内；直接输出路径 XShape 全空零像素，muffin
+     合成路径最坏 1px 黑点（真实桌面屏幕右下角，可接受）
+   - HostAnchorPosition()：优先 origin=(0,0) 的 monitor（testufo 用全局
+     坐标比 screen.width，仅 origin=0 的屏能过；单屏即主屏），fallback
+     primary → 第一个 monitor → (0,0)+errorLog
+
+### 改动清单
+
+- in_app_webview_gtk.cc：新增 HostAnchorPosition（头文件声明、定义在
+  匿名命名空间外避免歧义）；InitGtkHost 定位与 map 后重钉改用锚点；
+  HideHostWindow（XShape bounding/input 全空，扩展缺失显式报错），
+  map 后调用
+- in_app_webview.cc：setSize 重钉改用锚点（位置重算，尺寸同步）
+- in_app_webview.h：HostAnchorPosition 声明；宿主注释同步
+- LINUX_BACKEND.md：离屏宿主行更新
+
+### 验证证据（Xvfb :99 + muffin + xdotool）
+
+- 探针（修复后）：screenX:0, screenY:0；testufo 判定复刻页 syncFail:false，
+  rAF 帧时钟 66.3fps 健康（frame clock 不受影响）
+- 差分实验：窗口三个位置 screenX 恒 0（monitor 语义实锤）
+- root 截图：幽灵大块消失（对照：方案 1 的全屏白块）
+- resize 回归：vai 900x600 后窗口树宿主 `900x512+1599+999`（重钉正确）
+- 多标签回归：两宿主同锚点共存（900x512+1599+999 ×2），无崩溃
+- 输入回归：地址栏鼠标点击/输入/导航全程正常（input shape 穿透）
+- vai 侧 flutter analyze 0 issue、flutter build linux --debug 通过
+
+### 已知边界
+
+- muffin 合成器无视 XShape（合成绘制路径），锚点处 1px 像素不可避免
+- Xvfb 无 DRI3 下 GPU capture 不可用（原有边界），testufo 真实页面的
+  Hz 数值显示需在 GPU 直通环境（真实桌面）确认；判定逻辑已被复刻页实锤
+- WebKitGTK screenX 的 monitor 语义（相交→monitor 原点）是黑盒差分结论，
+  升级 WebKit 后若语义变化需重测（探针工具保留在 vai/tools 可复用）
+
 ## 2026-09-04 修复：Linux 滚动过快（双重单位换算）+ 输入框 caret 不显示（focus 链路断裂）
 
 ### Bug 1：页面滑动过快（RCA + 标定）
