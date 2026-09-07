@@ -443,6 +443,9 @@ class InAppWebView {
   // GPU 直通捕获（XComposite redirect + EGLImage 零拷贝）。构造时能力检查
   // 失败则为空（唯一渲染管线不可用，显式报错，无回退）。
   std::unique_ptr<WebKitGpuCapture> gpu_capture_ = nullptr;
+  // 延迟映射状态：InitGtkHost 只 realize 不 map；MapHostNow 首次调用后置 true。
+  bool host_mapped_ = false;
+  guint map_failsafe_source_id_ = 0;
 
   // GTK signal handlers
   gulong gtk_scale_handler_id_ = 0;         // notify::scale-factor on the webview widget
@@ -646,6 +649,10 @@ class InAppWebView {
 
  private:
   // === WebKit signals (same as WebKitGTK) ===
+  // 延迟映射宿主（首帧同步等帧修复）：load-changed FINISHED/FAILED 或兜底
+  // 定时器调用；幂等。gtk_host_window_ 为空（普通嵌窗模式）时 no-op。
+  void MapHostNow();
+
   static void OnLoadChanged(WebKitWebView* web_view, WebKitLoadEvent load_event,
                             gpointer user_data);
 

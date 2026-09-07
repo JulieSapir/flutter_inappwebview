@@ -250,6 +250,12 @@ void InAppWebView::AttachChannel(FlBinaryMessenger* messenger, const std::string
 InAppWebView::~InAppWebView() {
   debugLog("dealloc InAppWebView");
 
+  // 兜底映射定时器：对象销毁前必须移除，避免悬垂回调。
+  if (map_failsafe_source_id_ != 0) {
+    g_source_remove(map_failsafe_source_id_);
+    map_failsafe_source_id_ = 0;
+  }
+
   context_menu_popup_.reset();
 
   if (findInteractionController_) {
@@ -390,6 +396,28 @@ void InAppWebView::InitWebView(const InAppWebViewCreationParams& params) {
   if (!params.hostInBrowserWindow) {
     InitGtkHost();
   }
+}
+
+// 首帧同步等帧修复（webkitgtk 2.52.3 源码+实测）：
+// WebKitWebView 的 draw class handler 在 backing store 未填充时会进入
+// forceUpdateIfNeeded：send(ForceUpdate) + waitForAndDispatchImmediately(500ms)
+// 阻塞式等同步往返，WebProcess 冷启动窗口内实测卡死合并主线程 1.03~1.10s。
+// 而该等待仅在 gtk_widget_get_mapped(webview)==TRUE 时可进入；因此 InitGtkHost
+// 只 realize 不 map，把进程冷启动整段藏进不可见期。WebProcess 的 load 不需要可见
+// （Epiphany 预加载同理），load-changed FINISHED（源自 WebProcess，文档加载完成、
+// 首帧渲染在即）时映射宿主：可见→恢复 painting→首帧→didUpdate 填 store，
+// 首个 draw 最多等这段实际短程（实测 <100ms）。加载失败由兜底定时器接管。
+void InAppWebView::MapHostNow() {
+  if (host_mapped_ || gtk_host_window_ == nullptr) {
+    return;
+  }
+  host_mapped_ = true;
+  if (map_failsafe_source_id_ != 0) {
+    g_source_remove(map_failsafe_source_id_);
+    map_failsafe_source_id_ = 0;
+  }
+  gtk_widget_show(GTK_WIDGET(webview_));
+  gtk_widget_show(GTK_WIDGET(gtk_host_window_));
 }
 
 void InAppWebView::RegisterEventHandlers() {
@@ -2133,6 +2161,13 @@ void InAppWebView::OnLoadChanged(WebKitWebView* web_view, WebKitLoadEvent load_e
   // Check if WebView is still valid (WebProcess may have crashed)
   if (!WEBKIT_IS_WEB_VIEW(web_view)) {
     return;
+  }
+
+  // FINISHED 事件由 WebProcess 发出：文档加载完成、首帧渲染在即。
+  // 此刻映射宿主（见 MapHostNow），避开不可见期的同步等帧阻塞；
+  // 加载失败不触发本信号，由 1.5s 兜底定时器接管。
+  if (load_event == WEBKIT_LOAD_FINISHED) {
+    self->MapHostNow();
   }
 
   if (self->channel_delegate_ == nullptr) {

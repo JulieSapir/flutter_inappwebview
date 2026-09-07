@@ -23,10 +23,10 @@
 //   - requestPointerLock/Unlock：WebKitGTK 无公开指针锁定 API，返回 false
 //   - IME：popup 宿主下输入法行为待真实中文输入法环境回归验证（与离屏宿主机制相同）
 
-#include <gdk/gdk.h>
-#include <gdk/gdkx.h>  // GDK_IS_X11_WINDOW（GPU 直通宿主 X 窗口钉位）
 #include <X11/Xlib.h>
 #include <X11/extensions/shape.h>  // 宿主 XShape bounding/input 全空（屏内隐形）
+#include <gdk/gdk.h>
+#include <gdk/gdkx.h>  // GDK_IS_X11_WINDOW（GPU 直通宿主 X 窗口钉位）
 
 #include <cmath>
 #include <memory>
@@ -184,9 +184,7 @@ void InAppWebView::RefreshImFixRegistration() {
   vai_imfix_unregister_owner(this);
 
   GdkWindow* fl_gdk =
-      gtk_window_ != nullptr
-          ? gtk_widget_get_window(GTK_WIDGET(gtk_window_))
-          : nullptr;
+      gtk_window_ != nullptr ? gtk_widget_get_window(GTK_WIDGET(gtk_window_)) : nullptr;
   if (fl_gdk == nullptr || !GDK_IS_X11_WINDOW(fl_gdk)) {
     // Flutter 窗口未 map：期望根坐标不可得，保持注销（宁可候选框落在
     // 宿主锚点，也不补偿到错误位置）
@@ -199,20 +197,17 @@ void InAppWebView::RefreshImFixRegistration() {
   gdk_window_get_origin(fl_gdk, &fl_x, &fl_y);
 
   const int scale = gtk_widget_get_scale_factor(GTK_WIDGET(gtk_window_));
-  const int desired_x =
-      fl_x + static_cast<int>(lround(texture_offset_x_ * scale));
-  const int desired_y =
-      fl_y + static_cast<int>(lround(texture_offset_y_ * scale));
+  const int desired_x = fl_x + static_cast<int>(lround(texture_offset_x_ * scale));
+  const int desired_y = fl_y + static_cast<int>(lround(texture_offset_y_ * scale));
   const int dx = desired_x - host_x;
   const int dy = desired_y - host_y;
 
   CollectTreeXids(host_gdk, this, dx, dy);
   {
     std::ostringstream oss;
-    oss << "InAppWebView(gtk): imfix registered delta=(" << dx << "," << dy
-        << ") host=(" << host_x << "," << host_y << ") fl=(" << fl_x << ","
-        << fl_y << ") offset=(" << texture_offset_x_ << ","
-        << texture_offset_y_ << ")";
+    oss << "InAppWebView(gtk): imfix registered delta=(" << dx << "," << dy << ") host=(" << host_x
+        << "," << host_y << ") fl=(" << fl_x << "," << fl_y << ") offset=(" << texture_offset_x_
+        << "," << texture_offset_y_ << ")";
     debugLog(oss.str());
   }
 }
@@ -272,8 +267,20 @@ void InAppWebView::InitGtkHost() {
     gtk_widget_size_allocate(GTK_WIDGET(gtk_host_window_), &win_alloc);
   }
 
-  gtk_widget_show(GTK_WIDGET(webview_));
-  gtk_widget_show(GTK_WIDGET(gtk_host_window_));
+  // 延迟映射（首帧同步等帧修复，见 MapHostNow 注释）：只 realize 不 map，
+  // 宿主 X 窗口/捕获管线/输入链路不受影响（均为 realized 级依赖）；
+  // 真实 show+map 由 load-changed FINISHED 或 1.5s 兜底触发。
+  gtk_widget_realize(GTK_WIDGET(gtk_host_window_));
+  gtk_widget_realize(GTK_WIDGET(webview_));
+  map_failsafe_source_id_ = g_timeout_add(
+      1500,
+      +[](gpointer user_data) -> gboolean {
+        auto* self = static_cast<InAppWebView*>(user_data);
+        self->map_failsafe_source_id_ = 0;
+        self->MapHostNow();
+        return G_SOURCE_REMOVE;
+      },
+      this);
 
   // map 后立即用 gdk 路径把宿主 X 窗口钉到位。RCA（初次载入脏）：
   // gtk_window_resize 的请求要等 GTK 主循环布局轮才落到 X 服务端（实测 ~1.2s），
@@ -294,9 +301,10 @@ void InAppWebView::InitGtkHost() {
     // innerWidth < 0 → SYNC FAIL，探针实测 -2816）；手动 XComposite redirect
     // 无法阻止 muffin 类合成器绘制 OR 窗口（XShape 是 server 端 clip，
     // 两条输出路径均有效）。
-    HideHostWindow(host_gdk);    // 宿主树 XID 注册（首帧 Dart 视口偏移未到，先按 offset=0 注册；
+    HideHostWindow(host_gdk);  // 宿主树 XID 注册（首帧 Dart 视口偏移未到，先按 offset=0 注册；
     // setTextureOffset 到达后立即精确化，见 RefreshImFixRegistration）
-    RefreshImFixRegistration();  }
+    RefreshImFixRegistration();
+  }
 
   // 宿主就绪后启动捕获（redirect + damage 源 + 首帧别名）。
   // 帧输出回调在纹理注册后由 AttachGpuCaptureOutput 接线；此前 damage 只计数。
@@ -337,13 +345,13 @@ void InAppWebView::InitGtkHost() {
     // Flutter 窗口移动/缩放（configure-event）：宿主根原点与 Flutter 窗口根
     // 原点的相对关系变化，IME 补偿 delta 需重算。方法通道侧布局变化
     // （setTextureOffset）与宿主重钉（setSize）各自触发 refresh。
-    gtk_window_configure_handler_id_ =
-        g_signal_connect(gtk_window_, "configure-event",
-                         G_CALLBACK(+[](GtkWindow*, GdkEventConfigure*, gpointer user_data) -> gboolean {
-                           static_cast<InAppWebView*>(user_data)->RefreshImFixRegistration();
-                           return FALSE;
-                         }),
-                         this);
+    gtk_window_configure_handler_id_ = g_signal_connect(
+        gtk_window_, "configure-event",
+        G_CALLBACK(+[](GtkWindow*, GdkEventConfigure*, gpointer user_data) -> gboolean {
+          static_cast<InAppWebView*>(user_data)->RefreshImFixRegistration();
+          return FALSE;
+        }),
+        this);
   }
 
   RequestSnapshot();
