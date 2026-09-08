@@ -1,3 +1,34 @@
+## 0.3.0-beta.3
+
+- **修复页面滚动过慢（推翻 0.3.0-beta.2 的拟合常数）**：`GtkSetScrollDelta`
+  原先按 `px / (scale × max(34, H/7))` 还原单位，是把两个小视口样本
+  （204→34px、320→46px）线性外推。真实步长在 WebKit 源码里有闭式解——
+  `WebCore::Scrollbar::pixelsPerLineStep(int)` 在 `PLATFORM(GTK)` 分支返回
+  `int(pow(viewport, 2/3))`（无参版恒为 40）。旧拟合在 H>343 后系统性偏大：
+  H=900 时假设步长 128.6 vs 真值 93，滚轮一格只剩 38px（原生同视口应为
+  93px），窗口越高越慢。现改为按链路两端的确定性换算反解，不再需要标定：
+  引擎 `fl_scrolling_manager.cc` 对滚轮/触控板两条通道都乘
+  `kScrollOffsetMultiplier(53) × scale_factor`，框架 `converter.dart` 又除以
+  devicePixelRatio，递到插件的是「原生 GDK 单位 × 53」的逻辑像素——故
+  `unit = px / 53`，scale 自动抵消（旧实现多除一次 `scale_factor_`，
+  HiDPI 下还会再慢一半）
+- **修复触控板滚动方向反转**：引擎对 `GDK_SOURCE_TOUCHPAD` 的事件先
+  `delta *= -1` 再累加成 `pan_x/pan_y`（Flutter 的 `panDelta` 语义是手指位移，
+  由 `Scrollable` 自行反向消费）。本插件直接把 `panDelta` 原值喂给内容滚动，
+  等于漏掉了这次取负 → 触控板与滚轮方向相反。滚轮那条同类符号问题此前已修，
+  pan 分支当时漏修。现在 Dart 侧对 `panDelta` 取负后再下发
+- **滚动通道协议增加 `precise` 标志**：`setScrollDelta` 参数由
+  `[dx, dy]` 改为 `[dx, dy, precise]`（0=鼠标滚轮、1=触控板）。WebKit 对两类
+  输入采用不同步长（滚轮按 `pow(视口,2/3)`、precise 触控板按固定 40px），
+  而注入事件的 source device 是指针、必然走滚轮步长，故触控板通道按
+  `40 / pow(视口,2/3)` 逐轴补偿，保持与原生 WebKitGTK 的位移比一致
+- **修复 `InAppBrowser`（原生窗口）滚动方向反转**：该路径把真实 GDK 事件换算成
+  `±53` 时方向与引擎相反（DOWN→-53），在新单位还原下会把页面往反方向滚，
+  现按 `fl_scrolling_manager.cc` 的符号对齐，并按 source device 判定 precise 通道
+- **接线 `InAppWebViewSettings.scrollMultiplier`**：该设置此前在 Linux 被解析
+  但从应用（`scroll_multiplier_` 为死成员），Dart 侧调它没有任何效果；
+  现作为滚动增益真正生效，默认 1 行为不变
+
 ## 0.3.0-beta.2
 
 - **修复页面滚动过快**：`GtkSetScrollDelta` 存在双重单位换算——Flutter

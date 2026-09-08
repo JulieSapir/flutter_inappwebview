@@ -267,12 +267,19 @@ class CustomPlatformViewController
   }
 
   /// Sets the horizontal and vertical scroll delta.
-  Future<void> _setScrollDelta(double dx, double dy) async {
+  ///
+  /// [dx]/[dy] 为 Flutter 逻辑像素，且恒等于「原生 GDK 滚动单位 × 53」
+  /// （引擎 fl_scrolling_manager.cc 的 kScrollOffsetMultiplier；scale 在
+  /// converter.dart 里被 devicePixelRatio 除掉，故此处是逻辑像素）。
+  /// [precise] 标明输入通道：false=鼠标滚轮，true=触控板 pan。原生 WebKitGTK
+  /// 对两条通道采用不同步长（滚轮按视口 pow(H,2/3)，触控板按固定 40px），
+  /// 原生语义的还原在 C++ 侧完成，必须区分通道。
+  Future<void> _setScrollDelta(double dx, double dy, {required bool precise}) async {
     if (_isDisposed) {
       return;
     }
     assert(value.isInitialized);
-    return _methodChannel.invokeMethod('setScrollDelta', [dx, dy]);
+    return _methodChannel.invokeMethod('setScrollDelta', [dx, dy, precise ? 1 : 0]);
   }
 
   /// Sends a key event to the webview.
@@ -605,11 +612,22 @@ class _CustomPlatformViewState extends State<CustomPlatformView> {
                     _controller._setScrollDelta(
                       signal.scrollDelta.dx,
                       signal.scrollDelta.dy,
+                      precise: false,
                     );
                   }
                 },
                 onPointerPanZoomUpdate: (ev) {
-                  _controller._setScrollDelta(ev.panDelta.dx, ev.panDelta.dy);
+                  // 触控板必须取负：引擎 fl_scrolling_manager.cc 对
+                  // GDK_SOURCE_TOUCHPAD 的事件先做 `delta *= -1` 再累加成
+                  // pan_x/pan_y（Flutter 的 panDelta 语义是「手指位移」，
+                  // 由 Scrollable 自行反向消费）。本通道直接把值喂给 WebKit
+                  // 的内容滚动，等于把引擎的取负漏在了链路上 → 触控板方向
+                  // 与滚轮相反（滚轮那条的同类 bug 此前已修，pan 这条漏修）。
+                  _controller._setScrollDelta(
+                    -ev.panDelta.dx,
+                    -ev.panDelta.dy,
+                    precise: true,
+                  );
                 },
                 child: MouseRegion(
                   cursor: _cursor,

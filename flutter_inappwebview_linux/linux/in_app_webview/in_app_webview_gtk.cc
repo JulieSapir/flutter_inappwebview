@@ -555,30 +555,79 @@ void InAppWebView::GtkSetPointerButton(int kind, int button, int clickCount) {
   }
 }
 
-void InAppWebView::GtkSetScrollDelta(double dx, double dy) {
+namespace {
+// WebKit 无参版步长（触控板 precise 通道的原生步长），与
+// WebCore::Scrollbar::pixelsPerLineStep() 的 constexpr 40 对齐。
+constexpr int kWebKitPreciseLineStepPx = 40;
+
+// 完全镜像 WebCore::Scrollbar::pixelsPerLineStep(int)（PLATFORM(GTK) 分支，
+// Source/WebCore/platform/Scrollbar.cpp）：int(pow(视口尺寸, 2/3))，视口 <=0 时
+// 退回无参版固定步长 40（Source/WebCore/platform/Scrollbar.h constexpr）。
+int WebKitLineStepPx(int viewport_size) {
+  if (viewport_size <= 0) {
+    return kWebKitPreciseLineStepPx;
+  }
+  return static_cast<int>(std::pow(static_cast<double>(viewport_size), 2.0 / 3.0));
+}
+}  // namespace
+
+void InAppWebView::GtkSetScrollDelta(double dx, double dy, bool precise) {
   if (webview_ == nullptr) {
     return;
   }
 
-  // 单位还原（RCA：页面滑动过快）：
+  // 单位还原（RCA：页面滑动过慢 + 触控板方向反转）
   //
-  // 1) Flutter engine（fl_scrolling_manager.cc）把 GDK scroll delta 乘
-  //    kScrollOffsetMultiplier(53) * scale_factor 后发给 Dart（物理像素单位）；
-  //    GDK_SCROLL_SMOOTH 事件的 delta 是 GDK 原生单位，WebKit 按内部步长换算，
-  //    像素值原样回填会被再次换算（旧实现滚轮一格滚 ~2120px，即 53*40 双重放大）。
+  // 链路两端各有确定性换算，中间不存在需要实测拟合的未知常数：
   //
-  // 2) WebKitGTK SMOOTH delta→px 步长（原生标尺页实测标定，2026-09-04）：
-  //      视口 204 高：delta 1.0 → 34px（= 204/6）
-  //      视口 320 高：delta 1.0 → 46px（≈ 320/7，充分收敛后复测一致）
-  //    拟合 pxPerUnit = max(34, H/7)（H = 逻辑视口高）。两点定线存在外推
-  //    不确定性（±10% 量级），远优于修复前的 53 倍放大；后续如需精化可再标定。
+  // 1) 入端 Flutter engine（shell/platform/linux/fl_scrolling_manager.cc）：
+  //    滚轮与触控板两条通道都乘 kScrollOffsetMultiplier(53) * scale_factor，
+  //    随后 packages/flutter/lib/src/gestures/converter.dart 又除以
+  //    devicePixelRatio → Dart 递过来的 dx/dy 恰为「原生 GDK 单位 × 53」的
+  //    逻辑像素，scale 自动抵消。旧实现在此处再除一次 scale_factor_，
+  //    HiDPI 下会凭空多除一个 scale（2x 屏上直接减半速度）。
+  //    触控板通道引擎还额外做了 `delta *= -1`（Flutter 的 panDelta 语义是
+  //    手指位移，交给 Scrollable 自行反向消费）——方向抵消在 Dart 侧完成，
+  //    抵达本函数的符号已经是内容滚动方向（与滚轮一致）。
   //
-  // 目标语义：与 Flutter 桌面其他应用一致——滚轮一格 53 逻辑像素、触控板
-  // panDelta 1px:1px（Dart 侧 panDelta 与 scrollDelta 同像素语义，统一换算）。
-  const double scale = scale_factor_ > 0 ? scale_factor_ : 1.0;
-  const double viewport_h = height_ > 0 ? static_cast<double>(height_) : 204.0;
-  const double px_per_unit = viewport_h > 238.0 ? viewport_h / 7.0 : 34.0;
-  const double gdk_delta_per_px = 1.0 / (scale * px_per_unit);
+  // 2) 出端 WebKitGTK：内容位移 = |注入单位| * pixelsPerLineStep(viewSize)。
+  //    分两条步长（Source/WebKit/UIProcess/API/gtk/WebKitWebViewBase.cpp
+  //    webkitWebViewBaseScrollEvent）：
+  //      hasPreciseScrollingDeltas == false → pow(视口, 2/3)（滚轮的原生通道）
+  //      hasPreciseScrollingDeltas == true  → 固定 40px（触控板的原生通道）
+  //    而 hasPrecise 由事件的 source device 是否为非鼠标判定；本函数注入的
+  //    事件挂的是指针设备，故两条通道都会落到 pow(视口, 2/3) 上。
+  //
+  // 于是「与原生 WebKitGTK 手感全等」的解唯一：
+  //      滚轮：   单位 = px / 53              → 一格 = 1 行 = pow(H,2/3) px
+  //      触控板： 单位 = px / 53 * 40 / step  → 与原生 precise 通道等比
+  //    以 H=900 为例：滚轮一格 93px（旧实现只剩 38px，窗口越高越慢）。
+  //
+  // 旧实现用 max(34, H/7) 是拿两个小视口样本（204→34、320→46，实为 pow 曲线
+  // 的 34.6/46.8 取整）做线性外推，H>343 后即系统性偏大，浏览器实际视口 ~900
+  // 高时把步长高估 38%，表现为「滑动太慢」。
+  constexpr double kFlutterScrollMultiplier = 53.0;  // 引擎 kScrollOffsetMultiplier
+
+  double unit_x = dx / kFlutterScrollMultiplier;
+  double unit_y = dy / kFlutterScrollMultiplier;
+  if (precise) {
+    // 触控板：补偿 pow 步长与原生 precise 步长(40) 的比值，逐轴各按各的视口尺寸。
+    unit_x *= static_cast<double>(kWebKitPreciseLineStepPx) / WebKitLineStepPx(width_);
+    unit_y *= static_cast<double>(kWebKitPreciseLineStepPx) / WebKitLineStepPx(height_);
+  }
+
+  // Dart 侧 InAppWebViewSettings.scrollMultiplier 作为用户可见增益（此前该设置在
+  // Linux 被解析但从未应用，调了没反应）。
+  if (settings_ && settings_->scrollMultiplier != 1) {
+    const double gain = static_cast<double>(settings_->scrollMultiplier);
+    unit_x *= gain;
+    unit_y *= gain;
+  }
+
+  debugLog("InAppWebView(gtk): scroll precise=" + std::to_string(precise) +
+           " px=(" + std::to_string(dx) + "," + std::to_string(dy) + ") view=(" +
+           std::to_string(width_) + "x" + std::to_string(height_) + ") unit=(" +
+           std::to_string(unit_x) + "," + std::to_string(unit_y) + ")");
 
   GdkEventScroll* ev = reinterpret_cast<GdkEventScroll*>(gdk_event_new(GDK_SCROLL));
   ev->send_event = FALSE;
@@ -586,8 +635,8 @@ void InAppWebView::GtkSetScrollDelta(double dx, double dy) {
   ev->x = cursor_x_;
   ev->y = cursor_y_;
   ev->direction = GDK_SCROLL_SMOOTH;
-  ev->delta_x = dx * gdk_delta_per_px;
-  ev->delta_y = dy * gdk_delta_per_px;
+  ev->delta_x = unit_x;
+  ev->delta_y = unit_y;
   ev->state = DartModifiersToGdk(current_modifiers_);
   GtkSetEventDevice(reinterpret_cast<GdkEvent*>(ev), false);
   DispatchGdkEvent(reinterpret_cast<GdkEvent*>(ev));

@@ -782,31 +782,42 @@ gboolean InAppBrowser::OnDrawingAreaScroll(GtkWidget* widget, GdkEventScroll* ev
     return FALSE;
   }
 
+  // 把真实 GDK 滚动事件换算成 SetScrollDelta 的入参语义（= Flutter 逻辑像素，
+  // 即「原生 GDK 单位 × 53」），使本原生窗口路径与 Flutter 平台视图路径共用同一
+  // 套单位还原逻辑，最终对页面产生与原生 WebKitGTK 全等的位移。
+  //
+  // 方向对齐 fl_scrolling_manager.cc：UP/LEFT 为负、DOWN/RIGHT 为正。
+  // 此前这里对 DOWN 取 -53（连带 smooth 整体取负），经新单位还原后方向与原生
+  // 相反——属同一类符号 bug（Flutter 那条 Dart 侧已修，本条一直漏修）。
+  GdkDevice* source_device = gdk_event_get_source_device(reinterpret_cast<GdkEvent*>(event));
+  const bool precise =
+      source_device != nullptr && gdk_device_get_source(source_device) == GDK_SOURCE_TOUCHPAD;
+
   double dx = 0, dy = 0;
 
   if (event->direction == GDK_SCROLL_SMOOTH) {
-    dx = event->delta_x * -53.0;
-    dy = event->delta_y * -53.0;
+    dx = event->delta_x * 53.0;
+    dy = event->delta_y * 53.0;
   } else {
     switch (event->direction) {
       case GDK_SCROLL_UP:
-        dy = 53.0;
-        break;
-      case GDK_SCROLL_DOWN:
         dy = -53.0;
         break;
+      case GDK_SCROLL_DOWN:
+        dy = 53.0;
+        break;
       case GDK_SCROLL_LEFT:
-        dx = 53.0;
+        dx = -53.0;
         break;
       case GDK_SCROLL_RIGHT:
-        dx = -53.0;
+        dx = 53.0;
         break;
       default:
         break;
     }
   }
 
-  browser->webView_->SetScrollDelta(dx, dy);
+  browser->webView_->SetScrollDelta(dx, dy, precise);
   return TRUE;
 }
 

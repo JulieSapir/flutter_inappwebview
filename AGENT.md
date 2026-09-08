@@ -2,6 +2,77 @@
 
 > 本文件由维护 agent 写入，供下次接手时快速恢复上下文。
 
+## 2026-09-08 修复：滚动过慢（推翻 09-04 的拟合常数）+ 触控板方向反转
+
+### 症状
+
+用户实测（quantum 真实窗口，非 example 的 320 高小 webview）：滚轮与触控板都慢，
+且触控板方向与滚轮相反。
+
+### 根因（三处源码实锤，不再靠实测拟合）
+
+1. **入端**：`engine/src/flutter/shell/platform/linux/fl_scrolling_manager.cc`
+   对滚轮**和**触控板两条通道都乘 `kScrollOffsetMultiplier(53) × scale_factor`；
+   触控板分支还额外 `scroll_delta_x/y *= -1`（Flutter 的 `panDelta` 语义是手指位移）。
+   框架 `packages/flutter/lib/src/gestures/converter.dart` 又把 scrollDelta /
+   panDelta 都除以 `devicePixelRatio` → 递到插件的是**逻辑像素 = 原生 GDK 单位 × 53**，
+   scale 正好抵消。旧实现再除一次 `scale_factor_` 是多余的（2x 屏上再慢一半）。
+2. **出端**：`Source/WebCore/platform/Scrollbar.cpp`
+   `pixelsPerLineStep(int viewWidthOrHeight)` 在 `PLATFORM(GTK)||PLATFORM(WPE)`
+   分支 `return std::pow(viewWidthOrHeight, 2./3.)`（无参版 `constexpr 40`）。
+   `WebKitWebViewBase.cpp::webkitWebViewBaseScrollEvent`：
+   `hasPreciseScrollingDeltas`（由 source device 是否非鼠标判定）决定用哪套步长——
+   滚轮用 `pow(视口,2/3)`，触控板用固定 40。
+3. **对账**：09-04 的两个实测点 204→34、320→46 与 `pow` 闭式解 34.64/46.78 取整
+   **逐点全等**，而 `max(34, H/7)` 只在 H≈343 附近偶然重合 → 当年是拿小视口两点
+   做线性外推。H=900 时假设步长 128.6 vs 真值 93，滚轮一格 38.3px（原生 93px）。
+
+| 视口高 | WebKit 真步长 | 旧拟合 H/7 | 旧:px/格 | 新:px/格 |
+| ------ | ------------- | ---------- | -------- | -------- |
+| 204    | 34            | 34.0       | 53.0     | 34.0     |
+| 320    | 46            | 45.7       | 53.3     | 46.0     |
+| 600    | 71            | 85.7       | 43.9     | 71.0     |
+| 900    | 93            | 128.6      | 38.3     | 93.0     |
+| 1400   | 125           | 200.0      | 33.1     | 125.0    |
+
+（表格由 `/tmp/scroll_math_check.cc` 计算，镜像新实现与 WebKit 公式）
+
+### 方案（用户拍板目标：原生浏览器手感，不是 Flutter 53px/格语义）
+
+- `GtkSetScrollDelta(dx, dy, precise)`：滚轮 `unit = px/53`（一格 = 1 行 =
+  `pow(H,2/3)` px，与 Epiphany 全等）；触控板再乘 `40/pow(视口,2/3)` 逐轴补偿，
+  因为注入事件挂指针设备、WebKit 必然给它走滚轮步长。
+- Dart `custom_platform_view.dart`：`onPointerPanZoomUpdate` 下发 `-panDelta`
+  （抵消引擎取负）→ 修方向；两条通道都带 `precise` 标志，协议为
+  `setScrollDelta [dx, dy, precise]`（arg[2] 非 int 显式 respond_error，不静默回退）。
+- `InAppBrowser::OnDrawingAreaScroll`（原生窗口路径，同一套还原逻辑的另一个调用方）：
+  原先 DOWN→`-53` 与引擎符号相反，按 `fl_scrolling_manager.cc` 对齐
+  （UP/LEFT 负、DOWN/RIGHT 正），并按 `GDK_SOURCE_TOUCHPAD` 判 precise。
+- 顺手接线 `InAppWebViewSettings.scrollMultiplier`（此前解析了但从不应用，
+  `scroll_multiplier_` 是死成员，已删）：现作为增益真正生效，默认 1 不变。
+
+### 验证状态
+
+- `./scripts/build_linux.sh --debug` 全绿；`bundle/lib/libflutter_inappwebview_linux_plugin.so`
+  重新生成并 `strings` 命中新日志串 `scroll precise=`（产物级证据）
+- 换算模型对上表两个历史实测点逐点全等（源码闭式解 + 实测双证）
+- **端到端手感待用户真机验收**：Xvfb `:99` 下 xdotool 滚轮/键盘对新实例不可靠
+  （09-04 已记录的既有边界，本次复现：注入 click 5 后插件零输入日志），
+  触控板手势更是无法合成。插件内 `debugLog` 已打 `px/view/unit`，
+  debug 包 `G_MESSAGES_DEBUG=all` 启动即可核对「一格 → unit=1.000000」。
+- 09-04 遗留的「第三标定点（视口 >400）未做 / HiDPI 未实测」两项：前者由源码
+  闭式解取代（不再需要标定）；后者公式已不含 scale，逻辑像素天然与 DPI 无关
+
+### 下一步（若真机反馈仍偏慢/偏快，只动这一处）
+
+- 触控板想改成「手指位移 1:1」而非原生 40px/单位：把 `kWebKitPreciseLineStepPx`
+  的补偿换掉（`unit = px/53` 直接给滚轮步长），或直接设 `scrollMultiplier`
+- **未验证嫌疑（本宿主无 Windows 环境，未改）**：`flutter_inappwebview_windows`
+  的 `onPointerPanZoomUpdate(ev) → _setScrollDelta(ev.panDelta.dx, ev.panDelta.dy)`
+  同样没有抵消引擎取负；Windows 的 pan 是否反向需在 Windows 宿主上实测再动
+- 触控板手势收尾：未合成 GTK scroll-stop（`is_stop`）事件，WebKit 靠 500ms 超时
+  自行结束手势；若真机出现惯性/回弹异常，再补 `onPointerPanZoomEnd` → stop 事件
+
 ## 2026-09-06 修复：IME 候选框漂移（离屏宿主根坐标语义，Xlib 层坐标补偿）
 
 ### 症状与根因（全链源码实锤）

@@ -2060,11 +2060,11 @@ void InAppWebView::SetPointerButton(int kind, int button, int clickCount) {
   GtkSetPointerButton(kind, button, clickCount);
 }
 
-void InAppWebView::SetScrollDelta(double dx, double dy) {
+void InAppWebView::SetScrollDelta(double dx, double dy, bool precise) {
   // Hide all popups when scrolling
   HideAllPopups();
 
-  GtkSetScrollDelta(dx, dy);
+  GtkSetScrollDelta(dx, dy, precise);
 }
 
 void InAppWebView::SendKeyEvent(int type, int64_t keyCode, int scanCode, int modifiers,

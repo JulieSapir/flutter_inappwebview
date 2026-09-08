@@ -263,7 +263,10 @@ class InAppWebView {
   void RefreshImFixRegistration();
   void SetCursorPos(double x, double y);
   void SetPointerButton(int kind, int button, int clickCount = 1);
-  void SetScrollDelta(double dx, double dy);
+  // dx/dy：Flutter 逻辑像素（= 原生 GDK 滚动单位 × 53）。
+  // precise：false=鼠标滚轮、true=触控板 pan。WebKitGTK 对两条通道的
+  // 单位→像素步长不同，必须带通道信息才能还原原生手感（见 GtkSetScrollDelta）。
+  void SetScrollDelta(double dx, double dy, bool precise);
   void SendKeyEvent(int type, int64_t keyCode, int scanCode, int modifiers,
                     const std::string& characters);
   void SendTouchEvent(int type, int id, double x, double y,
@@ -537,8 +540,6 @@ class InAppWebView {
   uint32_t button_state_ = 0;
   uint32_t current_modifiers_ = 0;  // Current keyboard modifiers (shift, ctrl, alt, meta)
 
-  // Scroll multiplier
-  double scroll_multiplier_ = 1.0;
 
   // Progress tracking
   double last_progress_ = 0.0;
@@ -606,7 +607,7 @@ class InAppWebView {
   // === Input synthesis (implemented in in_app_webview_gtk.cc) ===
   void GtkSetCursorPos(double x, double y);
   void GtkSetPointerButton(int kind, int button, int clickCount);
-  void GtkSetScrollDelta(double dx, double dy);
+  void GtkSetScrollDelta(double dx, double dy, bool precise);
   void GtkSendKeyEvent(int type, int64_t keyCode, int scanCode, uint32_t modifiers);
   void GtkSetFocused(bool focused);
   void GtkSendTouchEvent(int type, int id, double x, double y,

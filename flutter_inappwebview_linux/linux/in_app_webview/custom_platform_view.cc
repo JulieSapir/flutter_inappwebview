@@ -257,9 +257,9 @@ void CustomPlatformView::HandleMethodCallImpl(FlMethodCall* method_call) {
     return;
   }
 
-  // setScrollDelta: [double dx, double dy]
+  // setScrollDelta: [double dx, double dy, int64 precise]
   if (strcmp(method, "setScrollDelta") == 0) {
-    if (fl_value_get_type(args) == FL_VALUE_TYPE_LIST && fl_value_get_length(args) >= 2) {
+    if (fl_value_get_type(args) == FL_VALUE_TYPE_LIST && fl_value_get_length(args) >= 3) {
       FlValue* dx_value = fl_value_get_list_value(args, 0);
       FlValue* dy_value = fl_value_get_list_value(args, 1);
       double dx = 0, dy = 0;
@@ -276,8 +276,19 @@ void CustomPlatformView::HandleMethodCallImpl(FlMethodCall* method_call) {
         dy = static_cast<double>(fl_value_get_int(dy_value));
       }
 
+      // 第三条：输入通道标志（0=鼠标滚轮、1=触控板 pan）。缺失即为协议不同步，
+      // 显式报错不做静默回退。
+      FlValue* precise_value = fl_value_get_list_value(args, 2);
+      if (fl_value_get_type(precise_value) != FL_VALUE_TYPE_INT) {
+        errorLog("InAppWebViewFlutter(plain): setScrollDelta arg[2] precise must be an int");
+        fl_method_call_respond_error(method_call, "invalid-args", "setScrollDelta arg[2] must be an int",
+                                     nullptr, nullptr);
+        return;
+      }
+      const bool precise = fl_value_get_int(precise_value) != 0;
+
       if (webview_) {
-        webview_->SetScrollDelta(dx, dy);
+        webview_->SetScrollDelta(dx, dy, precise);
       }
     }
     fl_method_call_respond_success(method_call, nullptr, nullptr);
