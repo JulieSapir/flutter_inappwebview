@@ -130,6 +130,28 @@ void DamageSourceFinalize(GSource* source) {
 GSourceFuncs kDamageSourceFuncs = {DamageSourcePrepare,  DamageSourceCheck, DamageSourceDispatch,
                                    DamageSourceFinalize, nullptr,           nullptr};
 
+// 1x1 白底占位纹理（引擎 raster 线程、上下文 current 时调用）。
+// 首帧未到期间 populate 若直接失败，flutter_linux 引擎会对每次合成 g_warning
+// （"no frame yet"）——输入框聚焦时光标闪烁每帧合成一次即逐帧刷屏。改为交付
+// 一张白底占位纹理：与 webkit_web_view_set_background_color 的白底同源，
+// 观感等同「页面加载中」，真帧到达后由 EGLImage 绑定整体替换存储。
+bool EnsurePlaceholderTexture(uint32_t texture, GError** error) {
+  static const GLubyte kWhite[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+  glBindTexture(GL_TEXTURE_2D, texture);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, kWhite);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  if (glGetError() != GL_NO_ERROR) {
+    g_set_error(error, g_quark_from_static_string("WebKitGpuCapture"), 5,
+                "placeholder texture allocation failed");
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 // === 私有实现 ===
@@ -163,6 +185,7 @@ struct WebKitGpuCapture::Impl {
                                                   // （XCopyArea 自旧帧的左上重叠区，非垃圾）
   GC copy_gc = 0;                                 // XCopyArea 复用 GC（Start 创建，Stop 释放）
   int import_failures = 0;                        // 连续导入失败计数（用于一次性响亮日志）
+  bool placeholder_logged = false;                // 白底占位分支一次性打点（验证路径命中）
   EGLDisplay engine_dpy = EGL_NO_DISPLAY;         // 首次导入时缓存的引擎显示句柄
 
   void DisposeDisplay() {
@@ -360,6 +383,30 @@ void WebKitGpuCapture::Stop() {
   debugLog("WebKitGpuCapture: stopped");
 }
 
+// 见头文件注释：累计本批 damage 进 await_bbox 并集并判定是否铺满目标 drawable。
+bool WebKitGpuCapture::AccumulateAwaitCoverage(int32_t ev_min_x, int32_t ev_min_y,
+                                               int32_t ev_max_x, int32_t ev_max_y, uint32_t w,
+                                               uint32_t h) {
+  if (ev_max_x >= ev_min_x && ev_max_y >= ev_min_y) {
+    if (impl_->await_bbox_max_x < impl_->await_bbox_min_x) {  // 第一批
+      impl_->await_bbox_min_x = ev_min_x;
+      impl_->await_bbox_min_y = ev_min_y;
+    } else {
+      impl_->await_bbox_min_x = std::min(impl_->await_bbox_min_x, ev_min_x);
+      impl_->await_bbox_min_y = std::min(impl_->await_bbox_min_y, ev_min_y);
+    }
+    impl_->await_bbox_max_x = std::max(impl_->await_bbox_max_x, ev_max_x);
+    impl_->await_bbox_max_y = std::max(impl_->await_bbox_max_y, ev_max_y);
+  }
+  // 有效区域 = 拷贝的旧内容矩形 ∪ 跨批 damage 并集（联合包围盒阶梯近似）
+  const bool bbox_valid = impl_->await_bbox_max_x >= impl_->await_bbox_min_x;
+  const int32_t eff_max_x = std::max<int32_t>(bbox_valid ? impl_->await_bbox_max_x : 0,
+                                              static_cast<int32_t>(impl_->old_content_w));
+  const int32_t eff_max_y = std::max<int32_t>(bbox_valid ? impl_->await_bbox_max_y : 0,
+                                              static_cast<int32_t>(impl_->old_content_h));
+  return eff_max_x >= int32_t(w) && eff_max_y >= int32_t(h);
+}
+
 void WebKitGpuCapture::PresentOnce(uint32_t ev_w, uint32_t ev_h, bool ev_covers_full,
                                    int32_t ev_min_x, int32_t ev_min_y, int32_t ev_max_x,
                                    int32_t ev_max_y) {
@@ -369,7 +416,16 @@ void WebKitGpuCapture::PresentOnce(uint32_t ev_w, uint32_t ev_h, bool ev_covers_
   // 节流：damage 风暴下限制 present 频率（~125Hz 上限）
   int64_t now = g_get_monotonic_time();
   if (now - impl_->last_present_us < 8000) {
-    return;
+    // 被丢弃批次的 damage 已在 X 侧消费完毕，守门期若跳过累计即永久丢失覆盖率：
+    // 多批渐进重绘凑不齐「铺满 drawable」→ 首帧门永不开启（画面停在占位帧，
+    // 且引擎逐帧告警）。故节流分支仍须记账；恰好在此刻铺满则放行本批，
+    // 免得铺齐后还要空等下一次 damage。
+    const bool same_generation = impl_->awaiting_full_repaint && ev_w != 0 && ev_h != 0 &&
+                                 impl_->await_w == ev_w && impl_->await_h == ev_h;
+    if (!same_generation ||
+        !AccumulateAwaitCoverage(ev_min_x, ev_min_y, ev_max_x, ev_max_y, ev_w, ev_h)) {
+      return;
+    }
   }
   impl_->last_present_us = now;
 
@@ -461,100 +517,123 @@ void WebKitGpuCapture::PresentOnce(uint32_t ev_w, uint32_t ev_h, bool ev_covers_
     }
     if (src == 0) {
       // 首帧（无任何已交付帧，无可拷贝的旧内容）：只能等 WebKit 重绘完成
-      // ——跨批累计 damage 并集覆盖全 drawable 才放行，不设超时（黑屏优于
-      // 显存噪声）。WebKit 布局完成后首绘必然铺满 drawable，正常 0.1~0.7s。
+      // ——跨批累计 damage 并集覆盖全 drawable 才放行（超时兜底见下）。
+      // 本批与新世代几何同源，覆盖率当场计入（丢弃即永久丢失）。
       debugLog("WebKitGpuCapture: await full repaint " + std::to_string(w) + "x" +
                std::to_string(h) + " (first frame, no old content)");
-      XFreePixmap(impl_->dpy, px);  // 等待期间不需要该别名（修复泄漏）
-      return;
-    }
-    // resize 过渡：旧帧内容填充新 backing，消除「等整幅重绘」的拖拽冻结
-    // （实测 20 步拖拽 1.2s 零帧交付——WebKit 全幅重绘 ~60-100ms 赶不上
-    // 65ms 步进，在途重绘 damage 被下一步重置吞掉）。两步填充后 backing
-    // 全域有效，本帧立即放行；WebKit 全幅重绘随后到达，作为稳态帧覆盖：
-    //  1. XCopyArea：左上重叠区填旧帧内容（缩小方向即全域）
-    //  2. XFillRectangle：增量区（右条+下条）用旧帧右下角像素色填充
-    //     （自适应深/浅色页面；取色失败回退白色）
-    const uint32_t cw = std::min(sw, w);
-    const uint32_t ch = std::min(sh, h);
-    unsigned long fill_pixel = 0xFFFFFFFF;
-    bool fill_ok = false;
-    {
-      ScopedXErrors guard(impl_->dpy);
-      if (impl_->copy_gc == 0) {
-        impl_->copy_gc = XCreateGC(impl_->dpy, px, 0, nullptr);
+      if (!AccumulateAwaitCoverage(ev_min_x, ev_min_y, ev_max_x, ev_max_y, w, h)) {
+        XFreePixmap(impl_->dpy, px);  // 等待期间不需要该别名（修复泄漏）
+        return;
       }
-      XCopyArea(impl_->dpy, src, px, impl_->copy_gc, 0, 0, cw, ch, 0, 0);
-      if (guard.count() == 0) {
-        impl_->old_content_w = cw;
-        impl_->old_content_h = ch;
-        if (w > cw || h > ch) {
-          // 取旧帧右下角单像素作为增量区填充色（深/浅色页面自适应）
-          XImage* img = XGetImage(impl_->dpy, src, static_cast<int>(sw) - 1,
-                                  static_cast<int>(sh) - 1, 1, 1, AllPlanes, ZPixmap);
-          if (img != nullptr) {
-            fill_pixel = XGetPixel(img, 0, 0);
-            XDestroyImage(img);
-          }
-          XSetForeground(impl_->dpy, impl_->copy_gc, fill_pixel);
-          if (w > cw) {
-            XFillRectangle(impl_->dpy, px, impl_->copy_gc, static_cast<int>(cw), 0, w - cw, h);
-          }
-          if (h > ch) {
-            XFillRectangle(impl_->dpy, px, impl_->copy_gc, 0, static_cast<int>(ch), cw, h - ch);
-          }
-        }
-        fill_ok = guard.count() == 0;
-      }
-    }
-    if (fill_ok) {
-      // backing 全域有效（旧内容 + 填充边），立即放行，不等重绘
       impl_->awaiting_full_repaint = false;
+      debugLog(std::string("WebKitGpuCapture: release frame repaint-complete after ") +
+               std::to_string((now - impl_->await_start_us) / 1000) +
+               "ms (batch_full=" + (ev_covers_full ? "1" : "0") + " first-frame " +
+               std::to_string(w) + "x" + std::to_string(h) + ")");
       present_now = true;
     } else {
-      // 拷贝/填充失败（X 错误）：backing 有垃圾，退回等待重绘（250ms 兜底）
-      debugLog("WebKitGpuCapture: resize fill failed, fallback to await repaint");
-      XFreePixmap(impl_->dpy, px);
-      return;
+      // resize 过渡：旧帧内容填充新 backing，消除「等整幅重绘」的拖拽冻结
+      // （实测 20 步拖拽 1.2s 零帧交付——WebKit 全幅重绘 ~60-100ms 赶不上
+      // 65ms 步进，在途重绘 damage 被下一步重置吞掉）。两步填充后 backing
+      // 全域有效，本帧立即放行；WebKit 全幅重绘随后到达，作为稳态帧覆盖：
+      //  1. XCopyArea：左上重叠区填旧帧内容（缩小方向即全域）
+      //  2. XFillRectangle：增量区（右条+下条）用旧帧右下角像素色填充
+      //     （自适应深/浅色页面；取色失败回退白色）
+      const uint32_t cw = std::min(sw, w);
+      const uint32_t ch = std::min(sh, h);
+      unsigned long fill_pixel = 0xFFFFFFFF;
+      bool fill_ok = false;
+      {
+        ScopedXErrors guard(impl_->dpy);
+        if (impl_->copy_gc == 0) {
+          impl_->copy_gc = XCreateGC(impl_->dpy, px, 0, nullptr);
+        }
+        XCopyArea(impl_->dpy, src, px, impl_->copy_gc, 0, 0, cw, ch, 0, 0);
+        if (guard.count() == 0) {
+          impl_->old_content_w = cw;
+          impl_->old_content_h = ch;
+          if (w > cw || h > ch) {
+            // 取旧帧右下角单像素作为增量区填充色（深/浅色页面自适应）
+            XImage* img = XGetImage(impl_->dpy, src, static_cast<int>(sw) - 1,
+                                    static_cast<int>(sh) - 1, 1, 1, AllPlanes, ZPixmap);
+            if (img != nullptr) {
+              fill_pixel = XGetPixel(img, 0, 0);
+              XDestroyImage(img);
+            }
+            XSetForeground(impl_->dpy, impl_->copy_gc, fill_pixel);
+            if (w > cw) {
+              XFillRectangle(impl_->dpy, px, impl_->copy_gc, static_cast<int>(cw), 0, w - cw, h);
+            }
+            if (h > ch) {
+              XFillRectangle(impl_->dpy, px, impl_->copy_gc, 0, static_cast<int>(ch), cw, h - ch);
+            }
+          }
+          fill_ok = guard.count() == 0;
+        }
+      }
+      if (fill_ok) {
+        // backing 全域有效（旧内容 + 填充边），立即放行，不等重绘
+        impl_->awaiting_full_repaint = false;
+        present_now = true;
+      } else {
+        // 拷贝/填充失败（X 错误）：backing 有垃圾，退回等待重绘（250ms 兜底）
+        debugLog("WebKitGpuCapture: resize fill failed, fallback to await repaint");
+        // 本批同样属于新世代，覆盖率当场计入
+        AccumulateAwaitCoverage(ev_min_x, ev_min_y, ev_max_x, ev_max_y, w, h);
+        XFreePixmap(impl_->dpy, px);
+        return;
+      }
     }
   } else if (impl_->awaiting_full_repaint) {
-    // 首帧等待中（正常 resize 不再进入此状态，仅首帧与填充失败回退）：
-    // 跨批累计本批 damage 区域
-    if (ev_max_x >= ev_min_x && ev_max_y >= ev_min_y) {
-      if (impl_->await_bbox_max_x < impl_->await_bbox_min_x) {  // 第一批
-        impl_->await_bbox_min_x = ev_min_x;
-        impl_->await_bbox_min_y = ev_min_y;
-      } else {
-        impl_->await_bbox_min_x = std::min(impl_->await_bbox_min_x, ev_min_x);
-        impl_->await_bbox_min_y = std::min(impl_->await_bbox_min_y, ev_min_y);
-      }
-      impl_->await_bbox_max_x = std::max(impl_->await_bbox_max_x, ev_max_x);
-      impl_->await_bbox_max_y = std::max(impl_->await_bbox_max_y, ev_max_y);
-    }
-    // 有效区域 = 拷贝的旧内容矩形 ∪ WebKit damage 并集，覆盖全 drawable 即重绘完成。
-    // （联合包围盒阶梯近似：拷贝矩形自 (0,0) 起，增量 damage 补右上/右下，
-    // 中间漏画的罕见场景由 250ms 兜底收敛）
-    const bool bbox_valid = impl_->await_bbox_max_x >= impl_->await_bbox_min_x;
-    const int32_t eff_max_x = std::max<int32_t>(bbox_valid ? impl_->await_bbox_max_x : 0,
-                                                static_cast<int32_t>(impl_->old_content_w));
-    const int32_t eff_max_y = std::max<int32_t>(bbox_valid ? impl_->await_bbox_max_y : 0,
-                                                static_cast<int32_t>(impl_->old_content_h));
-    const bool effective_covers_full = eff_max_x >= int32_t(w) && eff_max_y >= int32_t(h);
+    // 守门等待中（仅首帧与填充失败回退进入）：跨批累计本批 damage 覆盖率。
+    // 有效区域 = 拷贝的旧内容矩形 ∪ WebKit damage 并集，覆盖全 drawable 即
+    // 重绘完成（联合包围盒阶梯近似：拷贝矩形自 (0,0) 起，增量 damage 补
+    // 右上/右下，中间漏画的罕见场景由超时兜底收敛）。
+    const bool effective_covers_full =
+        AccumulateAwaitCoverage(ev_min_x, ev_min_y, ev_max_x, ev_max_y, w, h);
     // 超时兜底分级：
-    //  - 尚无任何帧交付（首帧，无拷贝源）：不设超时——宁可纹理未交付（黑屏
-    //    观感），不可放行未初始化 backing。WebKit 布局完成后首绘必然铺满
-    //    drawable（单批或渐进并集），正常 0.1~0.7s 内放行。
+    //  - 尚无任何帧交付（首帧，无拷贝源）：1.2s——到点把并集外未重绘区刷白
+    //    放行。原「不设超时」策略下，覆盖率一旦因故凑不齐就永不出帧（画面
+    //    停在占位帧且引擎逐帧告警），白底与 WebKit 背景色一致，观感可控。
     //  - 已有旧帧（resize 过渡）：250ms——兜底放行的帧此时也已无垃圾
     //    （拷贝旧内容 + 部分新内容），只防 WebProcess 卡死类极端场景。
     const bool have_old_frame = impl_->pending_w != 0;
     if (!ev_covers_full && !effective_covers_full) {
-      if (!have_old_frame) {
+      const int64_t budget_us = have_old_frame ? 250000 : 1200000;
+      if (now - impl_->await_start_us < budget_us) {
         XFreePixmap(impl_->dpy, px);
-        return;  // 首帧：必须等到 WebKit 重绘完成
+        return;  // 等待预算未用完，继续等全幅重绘
       }
-      if (now - impl_->await_start_us < 250000) {
-        XFreePixmap(impl_->dpy, px);
-        return;  // resize 过渡：兜底未到，继续等
+      if (!have_old_frame) {
+        // 只刷并集之外（未初始化显存），已重绘内容原样保留
+        const bool bbox_valid = impl_->await_bbox_max_x >= impl_->await_bbox_min_x;
+        const int32_t bw = static_cast<int32_t>(w);
+        const int32_t bh = static_cast<int32_t>(h);
+        const int32_t bx0 =
+            bbox_valid ? std::max<int32_t>(0, std::min(impl_->await_bbox_min_x, bw)) : 0;
+        const int32_t by0 =
+            bbox_valid ? std::max<int32_t>(0, std::min(impl_->await_bbox_min_y, bh)) : 0;
+        const int32_t bx1 =
+            bbox_valid ? std::max<int32_t>(0, std::min(impl_->await_bbox_max_x, bw)) : 0;
+        const int32_t by1 =
+            bbox_valid ? std::max<int32_t>(0, std::min(impl_->await_bbox_max_y, bh)) : 0;
+        ScopedXErrors guard(impl_->dpy);
+        if (impl_->copy_gc == 0) {
+          impl_->copy_gc = XCreateGC(impl_->dpy, px, 0, nullptr);
+        }
+        XSetForeground(impl_->dpy, impl_->copy_gc, 0xFFFFFFFF);
+        if (bx0 > 0) {
+          XFillRectangle(impl_->dpy, px, impl_->copy_gc, 0, 0, bx0, bh);
+        }
+        if (by0 > 0) {
+          XFillRectangle(impl_->dpy, px, impl_->copy_gc, 0, 0, bw, by0);
+        }
+        if (bx1 < bw) {
+          XFillRectangle(impl_->dpy, px, impl_->copy_gc, bx1, 0, bw - bx1, bh);
+        }
+        if (by1 < bh) {
+          XFillRectangle(impl_->dpy, px, impl_->copy_gc, 0, by1, bw, bh - by1);
+        }
       }
     }
     const bool timed_out = !ev_covers_full && !effective_covers_full;
@@ -605,6 +684,7 @@ bool WebKitGpuCapture::BindPendingFrameToTexture(uint32_t texture, uint32_t* out
   }
 
   // 无新帧但已有绑定内容：纹理保留原内容，报告既有尺寸
+  bool first_frame_pending = false;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->pending_pixmap == 0) {
@@ -613,9 +693,23 @@ bool WebKitGpuCapture::BindPendingFrameToTexture(uint32_t texture, uint32_t* out
         *out_height = impl_->bound_h;
         return true;
       }
-      g_set_error(error, g_quark_from_static_string("WebKitGpuCapture"), 2, "no frame yet");
+      first_frame_pending = true;
+    }
+  }
+  if (first_frame_pending) {
+    // 从未出帧（宿主延迟映射期 / 首帧守门期）：交付白底占位纹理。
+    // 此处若报失败，引擎对每次合成 g_warning("no frame yet")——输入框聚焦时
+    // 光标闪烁逐帧合成即刷屏。真帧到达后 EGLImage 整体替换纹理存储。
+    if (!EnsurePlaceholderTexture(texture, error)) {
       return false;
     }
+    if (!impl_->placeholder_logged) {
+      impl_->placeholder_logged = true;
+      debugLog("WebKitGpuCapture: no frame yet, bound white placeholder");
+    }
+    *out_width = 1;
+    *out_height = 1;
+    return true;
   }
 
   EGLDisplay edpy = eglGetCurrentDisplay();

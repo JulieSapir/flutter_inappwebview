@@ -83,6 +83,12 @@ class WebKitGpuCapture {
   struct Impl;
   Impl* impl_ = nullptr;
   bool active_ = false;
+
+  // 守门期覆盖率累计（主线程专用，await_* 不参与跨线程交接故免锁）：把本批
+  // damage 包围盒并入 await_bbox 并集，返回「并集 ∪ 已填充旧内容区」是否已
+  // 覆盖 [w]x[h]。present 节流丢弃的批次同样要走这里，否则覆盖率永久丢失。
+  bool AccumulateAwaitCoverage(int32_t ev_min_x, int32_t ev_min_y, int32_t ev_max_x,
+                               int32_t ev_max_y, uint32_t w, uint32_t h);
 };
 
 }  // namespace flutter_inappwebview_plugin
