@@ -256,6 +256,14 @@ InAppWebView::~InAppWebView() {
     map_failsafe_source_id_ = 0;
   }
 
+  // inspector 前端窗口：销毁窗口会带动 inspector view 销毁，由 WebKit 完成前端清理。
+  if (inspector_frontend_window_ != nullptr) {
+    GtkWindow* window = inspector_frontend_window_;
+    inspector_frontend_window_ = nullptr;
+    g_signal_handlers_disconnect_by_func(window, reinterpret_cast<void*>(OnInspectorWindowDestroy), this);
+    gtk_widget_destroy(GTK_WIDGET(window));
+  }
+
   context_menu_popup_.reset();
 
   if (findInteractionController_) {
@@ -3187,6 +3195,212 @@ void InAppWebView::OnContextMenuDismissed(WebKitWebView* web_view, gpointer user
   self->HideContextMenu();
 }
 
+namespace {
+
+// 内置菜单项语言：Linux 插件不依赖 Flutter 的 l10n 资源，按进程 locale 选文案。
+// g_get_language_names() 与 Flutter 跟随系统语言的行为一致（如 LANG=zh_CN.UTF-8
+// 返回 zh_CN.UTF-8 / zh_CN / zh）。
+enum class ContextMenuLang { kEn, kZhHans, kZhHant };
+
+ContextMenuLang CurrentContextMenuLang() {
+  const gchar* const* names = g_get_language_names();
+  for (int i = 0; names != nullptr && names[i] != nullptr; ++i) {
+    std::string name = names[i];
+    if (name.rfind("zh", 0) == 0) {
+      const bool traditional = name.find("Hant") != std::string::npos ||
+                               name.find("TW") != std::string::npos ||
+                               name.find("HK") != std::string::npos ||
+                               name.find("MO") != std::string::npos;
+      return traditional ? ContextMenuLang::kZhHant : ContextMenuLang::kZhHans;
+    }
+    if (name.rfind("en", 0) == 0) {
+      return ContextMenuLang::kEn;
+    }
+  }
+  return ContextMenuLang::kEn;
+}
+
+// 取当前语言的文案（三语：英 / 简中 / 繁中）
+const char* Tr(const char* en, const char* zh_hans, const char* zh_hant) {
+  switch (CurrentContextMenuLang()) {
+    case ContextMenuLang::kZhHans:
+      return zh_hans;
+    case ContextMenuLang::kZhHant:
+      return zh_hant;
+    case ContextMenuLang::kEn:
+    default:
+      return en;
+  }
+}
+
+}  // namespace
+
+// === WebKit Inspector 窗口 ===
+//
+// WebKitGTK 的 inspector 有两种呈现方式（见 WebKit 源码 WebInspectorUIProxyGtk.cpp）：
+//   1) platformAttach()：把 inspector view 作为子 widget 嵌进“被检查 web view 所在窗口”；
+//   2) platformCreateFrontendWindow()：自建 WebKitInspectorWindow 独立窗口。
+// 走哪条由 WebInspectorUIProxy::open() 按 m_isAttached 决定，m_isAttached 初值来自
+// shouldOpenAttached()（inspectorStartsAttached 默认 true + canAttach 为真），
+// 且 inspector 前端加载后还会主动请求 dock，所以默认几乎总是走 (1)。
+//
+// 本插件的 webview 挂在屏外 XShape 宿主窗口里，而它的像素被 XComposite 抓取后
+// 合成到主窗口纹理（见 webkit_gpu_capture）。于是默认 attach 同时踩两个坑：
+//   - inspector 被画进用户永远看不到的窗口，点“检查元素”看不到任何窗口；
+//   - inspector view 作为 webview 的子 widget 参与 webview 的 pixmap 绘制，
+//     内容被合成进主窗口纹理，表现为“窗口内闪一下”。
+//
+// 处理：接管 “attach” 信号（返回 TRUE 表示由应用接管，WebKit 不再调
+// webkitWebViewBaseAddWebInspector），把 inspector view 放进自建 GtkWindow。
+// 同时接管 detach / open-window / bring-to-front，保证 view 始终留在我们的窗口里，
+// WebKit 不会另建窗口把它夺走，也不会对我们的窗口调 webkitWebViewBaseRemoveWebInspector。
+
+void InAppWebView::EnsureInspectorSignals() {
+  if (webview_ == nullptr) {
+    return;
+  }
+  WebKitWebInspector* inspector = webkit_web_view_get_inspector(webview_);
+  if (inspector == nullptr) {
+    return;
+  }
+  // 惰性连接，且每个 inspector 实例只连一次
+  if (g_object_get_data(G_OBJECT(inspector), "quantum-inspector-signals") != nullptr) {
+    return;
+  }
+  g_object_set_data(G_OBJECT(inspector), "quantum-inspector-signals", GINT_TO_POINTER(1));
+  g_signal_connect(inspector, "attach", G_CALLBACK(OnInspectorAttach), this);
+  g_signal_connect(inspector, "detach", G_CALLBACK(OnInspectorDetach), this);
+  g_signal_connect(inspector, "open-window", G_CALLBACK(OnInspectorOpenWindow), this);
+  g_signal_connect(inspector, "bring-to-front", G_CALLBACK(OnInspectorBringToFront), this);
+  g_signal_connect(inspector, "closed", G_CALLBACK(OnInspectorClosed), this);
+}
+
+// 接住 attach：把 inspector view 放进自建窗口并 present，返回 TRUE 让 WebKit
+// 跳过默认嵌入（否则 view 会成为 webview 的子 widget，被合成进主窗口纹理）。
+// 注：release 构建下 NDEBUG 会剔除 debugLog/errorLog，因此这里用 g_message。
+gboolean InAppWebView::OnInspectorAttach(WebKitWebInspector* inspector, gpointer user_data) {
+  auto* self = static_cast<InAppWebView*>(user_data);
+  if (self == nullptr) {
+    return FALSE;
+  }
+  GtkWidget* view = static_cast<GtkWidget*>(static_cast<void*>(webkit_web_inspector_get_web_view(inspector)));
+  if (view == nullptr) {
+    // 没有前端视图时交回 WebKit 默认处理，避免建出空窗口。
+    g_warning("InAppWebView: inspector attach 时前端视图为空，交回默认处理");
+    return FALSE;
+  }
+  if (self->inspector_frontend_window_ == nullptr) {
+    GtkWidget* window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(window), "Web Inspector");
+    GdkDisplay* display = gdk_display_get_default();
+    GdkMonitor* monitor = display != nullptr ? gdk_display_get_monitor(display, 0) : nullptr;
+    GdkRectangle geometry = {};
+    if (monitor != nullptr) {
+      gdk_monitor_get_geometry(monitor, &geometry);
+    }
+    gtk_window_set_default_size(GTK_WINDOW(window), geometry.width > 0 ? geometry.width * 2 / 3 : 1024,
+                               geometry.height > 0 ? geometry.height * 2 / 3 : 700);
+    g_signal_connect(window, "destroy", G_CALLBACK(OnInspectorWindowDestroy), self);
+    self->inspector_frontend_window_ = GTK_WINDOW(window);
+  }
+  GtkWidget* window_widget = GTK_WIDGET(self->inspector_frontend_window_);
+  if (gtk_widget_get_parent(view) != window_widget) {
+    // gtk_container_remove 会掉一个引用，先自持一份再迁移。
+    g_object_ref(view);
+    if (GtkWidget* parent = gtk_widget_get_parent(view)) {
+      gtk_container_remove(GTK_CONTAINER(parent), view);
+    }
+    gtk_container_add(GTK_CONTAINER(window_widget), view);
+    g_object_unref(view);
+  }
+  gtk_widget_show_all(window_widget);
+  gtk_window_present(self->inspector_frontend_window_);
+  g_message("InAppWebView: inspector attach 已接管，前端视图放入独立窗口 %p",
+            static_cast<void*>(window_widget));
+  return TRUE;
+}
+
+// 接住 detach：返回 TRUE 让 WebKit 跳过 webkitWebViewBaseRemoveWebInspector
+// （此时 view 的 parent 是我们的 GtkWindow 而不是 WebKitWebViewBase，走了默认分支
+// 会把它当 WebKitWebViewBase 处理）。view 继续留在我们的窗口里。
+gboolean InAppWebView::OnInspectorDetach(WebKitWebInspector* inspector, gpointer user_data) {
+  g_message("InAppWebView: inspector detach 已接管，视图保留在独立窗口");
+  return TRUE;
+}
+
+// 接住 open-window：返回 TRUE 阻止 WebKit 自建 WebKitInspectorWindow
+// （那会把 inspector view 从我们的窗口里移走），改为 present 我们的窗口。
+gboolean InAppWebView::OnInspectorOpenWindow(WebKitWebInspector* inspector, gpointer user_data) {
+  auto* self = static_cast<InAppWebView*>(user_data);
+  g_message("InAppWebView: inspector open-window 已接管");
+  if (self != nullptr && self->inspector_frontend_window_ != nullptr) {
+    gtk_widget_show_all(GTK_WIDGET(self->inspector_frontend_window_));
+    gtk_window_present(self->inspector_frontend_window_);
+  }
+  return TRUE;
+}
+
+// 接住 bring-to-front：默认实现会 present view 的 toplevel（也就是我们的窗口），
+// 行为一致，这里显式接管以免依赖 WebKit 的实现细节。
+gboolean InAppWebView::OnInspectorBringToFront(WebKitWebInspector* inspector, gpointer user_data) {
+  auto* self = static_cast<InAppWebView*>(user_data);
+  if (self != nullptr && self->inspector_frontend_window_ != nullptr) {
+    gtk_window_present(self->inspector_frontend_window_);
+  }
+  return TRUE;
+}
+
+// inspector 前端被关闭（用户关窗或 WebKit 主动关闭）。销毁自建窗口，
+// 其中的 inspector view 随之销毁，WebKit 通过 view 的 destroy 通知完成清理。
+void InAppWebView::OnInspectorClosed(WebKitWebInspector* inspector, gpointer user_data) {
+  auto* self = static_cast<InAppWebView*>(user_data);
+  g_message("InAppWebView: inspector closed");
+  if (self == nullptr || self->inspector_frontend_window_ == nullptr) {
+    return;
+  }
+  GtkWindow* window = self->inspector_frontend_window_;
+  self->inspector_frontend_window_ = nullptr;
+  g_signal_handlers_disconnect_by_func(window, reinterpret_cast<void*>(OnInspectorWindowDestroy), self);
+  gtk_widget_destroy(GTK_WIDGET(window));
+}
+
+// 窗口被直接销毁（用户点关闭按钮）时的路径：只清指针。
+// inspector 前端的清理由 view 的 destroy 通知 WebKit 完成，随后 WebKit 会发 "closed"。
+void InAppWebView::OnInspectorWindowDestroy(GtkWidget* widget, gpointer user_data) {
+  auto* self = static_cast<InAppWebView*>(user_data);
+  g_message("InAppWebView: inspector 前端窗口被销毁");
+  if (self != nullptr && self->inspector_frontend_window_ == GTK_WINDOW(widget)) {
+    self->inspector_frontend_window_ = nullptr;
+  }
+}
+
+// 延迟状态探针：确认前端视图/窗口到底处于什么状态（诊断用）。
+gboolean InAppWebView::OnInspectorProbe(gpointer user_data) {
+  auto* self = static_cast<InAppWebView*>(user_data);
+  if (self == nullptr || self->webview_ == nullptr) {
+    g_warning("InAppWebView: inspector 探针：webview_ 为空");
+    return G_SOURCE_REMOVE;
+  }
+  WebKitWebInspector* inspector = webkit_web_view_get_inspector(self->webview_);
+  if (inspector == nullptr) {
+    g_warning("InAppWebView: inspector 探针：inspector 为空");
+    return G_SOURCE_REMOVE;
+  }
+  GtkWidget* view = static_cast<GtkWidget*>(static_cast<void*>(webkit_web_inspector_get_web_view(inspector)));
+  GtkWidget* toplevel = view != nullptr ? gtk_widget_get_toplevel(view) : nullptr;
+  const char* title = nullptr;
+  if (toplevel != nullptr && GTK_IS_WINDOW(toplevel)) {
+    title = gtk_window_get_title(GTK_WINDOW(toplevel));
+  }
+  g_message("InAppWebView: inspector 探针 attached=%d canAttach=%d view=%p toplevel=%p title=%s mapped=%d",
+            (int)webkit_web_inspector_is_attached(inspector),
+            (int)webkit_web_inspector_get_can_attach(inspector),
+            static_cast<void*>(view), static_cast<void*>(toplevel),
+            title != nullptr ? title : "(null)",
+            (int)(view != nullptr && gtk_widget_get_mapped(view)));
+  return G_SOURCE_REMOVE;
+}
+
 void InAppWebView::ShowNativeContextMenu() {
   // Use cached GTK window for the popup menu
   if (gtk_window_ == nullptr) {
@@ -3369,16 +3583,23 @@ void InAppWebView::ShowNativeContextMenu() {
 
           // === Developer Tools ===
           case WEBKIT_CONTEXT_MENU_ACTION_INSPECT_ELEMENT:
-            // WebKitGTK：直接调 WebKitWebInspector 打开检查器窗口。
-            // 原实现是空分支（且命中 case 后不会走 default 的 GAction 回退），
-            // 所以点击“检查元素”无任何反应；inspect 项的 GAction 在 WebKitGTK
-            // 下也不存在，必须走 inspector API。
+            // WebKitGTK：必须走 WebKitWebInspector API（inspect 项在 WebKitGTK 下
+            // 没有对应的 GAction，命中 case 后也不会落到 default 的 GAction 回退）。
+            // 窗口创建不在 WebKit 的 show() 里，而在 inspector 前端页面加载后触发的
+            // open()/attach 中：默认会 attach 到被检查页所在窗口（本插件下即屏外
+            // XShape 宿主窗口，其像素被 XComposite 合成进主窗口，会闪一下），
+            // 因此 EnsureInspectorSignals() 接管 attach，把前端视图放进自建窗口。
             if (webview_ != nullptr) {
+              EnsureInspectorSignals();
               WebKitWebInspector* inspector = webkit_web_view_get_inspector(webview_);
               if (inspector != nullptr) {
+                g_message("InAppWebView: 打开 Web Inspector");
                 webkit_web_inspector_show(inspector);
+                // 诊断：无条件下探针，验证前端视图/窗口状态
+                g_timeout_add(1500, OnInspectorProbe, this);
+                g_timeout_add(4000, OnInspectorProbe, this);
               } else {
-                errorLog("InAppWebView: 无法获取 WebKitWebInspector（检查元素不可用）");
+                g_warning("InAppWebView: 无法获取 WebKitWebInspector（检查元素不可用）");
               }
             }
             break;

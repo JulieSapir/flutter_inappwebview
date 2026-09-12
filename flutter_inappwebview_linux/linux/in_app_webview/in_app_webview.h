@@ -421,6 +421,20 @@ class InAppWebView {
   FlView* getFlView() const { return fl_view_; }
 
  private:
+  // === WebKit Inspector 窗口 ===
+  // inspector 默认 attach 到“被检查 web view 所在窗口”，而本插件 webview 挂在屏外
+  // XShape 宿主窗口上，且它渲染的像素会被 XComposite 抓取合成到主窗口纹理：
+  // 一旦 inspector view 成为 webview 的子 widget，既看不到窗口，又会闪一下。
+  // 这里接管 attach，把 inspector view 放进自建 GtkWindow。
+  void EnsureInspectorSignals();
+  static gboolean OnInspectorAttach(WebKitWebInspector* inspector, gpointer user_data);
+  static gboolean OnInspectorDetach(WebKitWebInspector* inspector, gpointer user_data);
+  static gboolean OnInspectorOpenWindow(WebKitWebInspector* inspector, gpointer user_data);
+  static gboolean OnInspectorBringToFront(WebKitWebInspector* inspector, gpointer user_data);
+  static void OnInspectorClosed(WebKitWebInspector* inspector, gpointer user_data);
+  static void OnInspectorWindowDestroy(GtkWidget* widget, gpointer user_data);
+  static gboolean OnInspectorProbe(gpointer user_data);
+
   PluginInstance* plugin_ = nullptr;  // Plugin instance for accessing managers
   FlPluginRegistrar* registrar_ = nullptr;
   FlBinaryMessenger* messenger_ = nullptr;  // Cached messenger from constructor
@@ -454,6 +468,8 @@ class InAppWebView {
   // 延迟映射状态：InitGtkHost 只 realize 不 map；MapHostNow 首次调用后置 true。
   bool host_mapped_ = false;
   guint map_failsafe_source_id_ = 0;
+  // inspector 前端所住的独立窗口（见 OnInspectorAttach，由本插件自建）
+  GtkWindow* inspector_frontend_window_ = nullptr;
 
   // GTK signal handlers
   gulong gtk_scale_handler_id_ = 0;         // notify::scale-factor on the webview widget
