@@ -431,8 +431,10 @@ void InAppWebView::RegisterEventHandlers() {
     // The registration is done via messageHandlerNames in plugin scripts (javascript_bridge_js.h)
     // This uses the with_reply API for proper Promise resolution in iframes
     user_content_controller_->setScriptMessageWithReplyHandler(
-        "callHandler", [this](const std::string& body, WebKitScriptMessageReply* reply) -> bool {
-          return handleScriptMessageWithReply(body, reply);
+        "callHandler",
+        [this](const std::string& body, WebKitScriptMessageReply* reply,
+               JSCContext* pageContext) -> bool {
+          return handleScriptMessageWithReply(body, reply, pageContext);
         });
 
     // Add plugin scripts based on settings
@@ -1854,6 +1856,15 @@ void InAppWebView::setSize(int width, int height) {
   if (gtk_host_window_ != nullptr) {
     // 宿主为 override-redirect 的 GTK_WINDOW_POPUP（GPU 直通，唯一宿主类型）。
     // 直接分配宿主窗口本身（GtkBin 正常传导链路），并把几何写入 X 服务端。
+    //
+    // RCA（预览 WebView 卡 800x600）：InitGtkHost 用 GTK 默认尺寸调用过
+    // gtk_window_resize(800,600)，GTK 的几何请求（geometry hint）就停在 800x600。
+    // 只做手动 size_allocate + gdk_window_move_resize 不改这个 hint，GTK 随后的
+    // 布局轮会把宿主（及其子 webview）拉回 800x600——首个 setSize 之后无第二次
+    // setSize 的视图（如设置页实时预览）必然被重置；主视图因为初始化期连续三次
+    // setSize（632/630/632），最后一次落在布局轮之后才看起来正常。故此处与
+    // gdk 路径一起同步更新 GTK 几何请求，两条写入者写入同一尺寸，布局轮不再回退。
+    gtk_window_resize(gtk_host_window_, width_, height_);
     GtkAllocation win_alloc = {0, 0, width_, height_};
     gtk_widget_size_allocate(GTK_WIDGET(gtk_host_window_), &win_alloc);
     // 宿主 X 窗口必须与 webview 子窗口同步 resize，否则 X11 子窗口渲染被祖先
@@ -3358,8 +3369,18 @@ void InAppWebView::ShowNativeContextMenu() {
 
           // === Developer Tools ===
           case WEBKIT_CONTEXT_MENU_ACTION_INSPECT_ELEMENT:
-            // Inspect element - not available in WPE WebKit without GTK inspector
-            // Fall through to GAction fallback
+            // WebKitGTK：直接调 WebKitWebInspector 打开检查器窗口。
+            // 原实现是空分支（且命中 case 后不会走 default 的 GAction 回退），
+            // 所以点击“检查元素”无任何反应；inspect 项的 GAction 在 WebKitGTK
+            // 下也不存在，必须走 inspector API。
+            if (webview_ != nullptr) {
+              WebKitWebInspector* inspector = webkit_web_view_get_inspector(webview_);
+              if (inspector != nullptr) {
+                webkit_web_inspector_show(inspector);
+              } else {
+                errorLog("InAppWebView: 无法获取 WebKitWebInspector（检查元素不可用）");
+              }
+            }
             break;
 
           // === Video Actions ===
@@ -3548,53 +3569,53 @@ void InAppWebView::ShowNativeContextMenu() {
       GAction* gaction = webkit_context_menu_item_get_gaction(webkit_item);
       bool enabled = (gaction != nullptr) ? g_action_get_enabled(gaction) : true;
 
-      // Map stock actions to labels
+      // Map stock actions to labels（按系统语言本地化，见文件上方 Tr/ContextMenuLang）
       const char* stock_label = nullptr;
       switch (stock_action) {
         case WEBKIT_CONTEXT_MENU_ACTION_OPEN_LINK:
-          stock_label = "Open Link";
+          stock_label = Tr("Open Link", "打开链接", "開啟連結");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_OPEN_LINK_IN_NEW_WINDOW:
-          stock_label = "Open Link in New Window";
+          stock_label = Tr("Open Link in New Window", "在新窗口打开链接", "在新視窗開啟連結");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_DOWNLOAD_LINK_TO_DISK:
-          stock_label = "Download Link";
+          stock_label = Tr("Download Link", "下载链接", "下載連結");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_COPY_LINK_TO_CLIPBOARD:
-          stock_label = "Copy Link";
+          stock_label = Tr("Copy Link", "复制链接地址", "複製連結網址");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_OPEN_IMAGE_IN_NEW_WINDOW:
-          stock_label = "Open Image in New Window";
+          stock_label = Tr("Open Image in New Window", "在新窗口打开图片", "在新視窗開啟圖片");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_DOWNLOAD_IMAGE_TO_DISK:
-          stock_label = "Download Image";
+          stock_label = Tr("Download Image", "下载图片", "下載圖片");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_COPY_IMAGE_TO_CLIPBOARD:
-          stock_label = "Copy Image";
+          stock_label = Tr("Copy Image", "复制图片", "複製圖片");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_GO_BACK:
-          stock_label = "Back";
+          stock_label = Tr("Back", "后退", "上一頁");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_GO_FORWARD:
-          stock_label = "Forward";
+          stock_label = Tr("Forward", "前进", "下一頁");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_STOP:
-          stock_label = "Stop";
+          stock_label = Tr("Stop", "停止", "停止");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_RELOAD:
-          stock_label = "Reload";
+          stock_label = Tr("Reload", "重新加载", "重新載入");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_COPY:
-          stock_label = "Copy";
+          stock_label = Tr("Copy", "复制", "複製");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_CUT:
-          stock_label = "Cut";
+          stock_label = Tr("Cut", "剪切", "剪下");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_PASTE:
-          stock_label = "Paste";
+          stock_label = Tr("Paste", "粘贴", "貼上");
           break;
         case WEBKIT_CONTEXT_MENU_ACTION_INSPECT_ELEMENT:
-          stock_label = "Inspect Element";
+          stock_label = Tr("Inspect Element", "检查元素", "檢查元素");
           break;
         default:
           continue;
@@ -3744,6 +3765,8 @@ static void OnColorDialogResponse(GtkDialog* dialog, gint response_id, gpointer 
   // Capture and clear reply before resolving (to prevent use after cleanup)
   WebKitScriptMessageReply* reply = self->pending_color_reply_;
   self->pending_color_reply_ = nullptr;
+  JSCContext* pageContext = self->pending_color_context_;
+  self->pending_color_context_ = nullptr;
 
   if (reply == nullptr) {
     // No reply object - just cleanup
@@ -3751,6 +3774,9 @@ static void OnColorDialogResponse(GtkDialog* dialog, gint response_id, gpointer 
     g_object_unref(dialog);
     self->active_color_dialog_ = nullptr;
     self->color_dialog_show_time_ = 0;
+    if (pageContext != nullptr) {
+      g_object_unref(pageContext);
+    }
     return;
   }
 
@@ -3761,10 +3787,14 @@ static void OnColorDialogResponse(GtkDialog* dialog, gint response_id, gpointer 
 
     std::string hexColor = RgbaToHexColor(&selectedRgba, self->active_color_alpha_enabled_);
     // Resolve the Promise with the selected color via webkit reply
-    self->ResolveInternalHandlerWithReply(reply, "\"" + hexColor + "\"");
+    self->ResolveInternalHandlerWithReply(reply, "\"" + hexColor + "\"", pageContext);
   } else {
     // User cancelled or closed the dialog - resolve with null
-    self->ResolveInternalHandlerWithReply(reply, "null");
+    self->ResolveInternalHandlerWithReply(reply, "null", pageContext);
+  }
+
+  if (pageContext != nullptr) {
+    g_object_unref(pageContext);
   }
 
   // Cleanup
@@ -3898,14 +3928,17 @@ void InAppWebView::HideAllPopups() {
 }
 
 void InAppWebView::ResolveInternalHandlerWithReply(WebKitScriptMessageReply* reply,
-                                                   const std::string& jsonResult) {
+                                                   const std::string& jsonResult,
+                                                   JSCContext* pageContext) {
   if (reply == nullptr) {
     debugLog("ResolveInternalHandlerWithReply: reply is NULL, cannot respond");
     return;
   }
 
-  // Create a JSCContext to build the reply value
-  JSCContext* context = jsc_context_new();
+  // 优先在页面自己的 JSCContext 上构造回复值。
+  // 临时 context 的 JSCValue 交回页面后是不完整的（只能读到 key，读属性全为 undefined）。
+  JSCContext* context = pageContext != nullptr ? static_cast<JSCContext*>(g_object_ref(pageContext))
+                                               : jsc_context_new();
   if (context == nullptr) {
     webkit_script_message_reply_return_error_message(reply, "Failed to create JSC context");
     webkit_script_message_reply_unref(reply);
@@ -4073,9 +4106,15 @@ static void OnDateDialogResponse(GtkDialog* dialog, gint response_id, gpointer u
   // Capture and clear reply before resolving (to prevent use after cleanup)
   WebKitScriptMessageReply* reply = self->pending_date_reply_;
   self->pending_date_reply_ = nullptr;
+  JSCContext* pageContext = self->pending_date_context_;
+  self->pending_date_context_ = nullptr;
 
   // Helper lambda for cleanup
   auto cleanup = [&]() {
+    if (pageContext != nullptr) {
+      g_object_unref(pageContext);
+      pageContext = nullptr;
+    }
     delete ctx;
     gtk_widget_destroy(GTK_WIDGET(dialog));
     g_object_unref(dialog);
@@ -4135,14 +4174,14 @@ static void OnDateDialogResponse(GtkDialog* dialog, gint response_id, gpointer u
 
     if (!result.empty()) {
       // Resolve the Promise with the selected value via webkit reply
-      self->ResolveInternalHandlerWithReply(reply, "\"" + result + "\"");
+      self->ResolveInternalHandlerWithReply(reply, "\"" + result + "\"", pageContext);
     } else {
       // No valid result - resolve with null
-      self->ResolveInternalHandlerWithReply(reply, "null");
+      self->ResolveInternalHandlerWithReply(reply, "null", pageContext);
     }
   } else {
     // User cancelled - resolve with null
-    self->ResolveInternalHandlerWithReply(reply, "null");
+    self->ResolveInternalHandlerWithReply(reply, "null", pageContext);
   }
 
   // Cleanup
@@ -4377,10 +4416,15 @@ void InAppWebView::HideDatePicker() {
     // Capture and clear reply before resolving
     WebKitScriptMessageReply* reply = pending_date_reply_;
     pending_date_reply_ = nullptr;
+    JSCContext* pageContext = pending_date_context_;
+    pending_date_context_ = nullptr;
 
     // Resolve the pending Promise with null when hiding the picker
     if (reply != nullptr) {
-      ResolveInternalHandlerWithReply(reply, "null");
+      ResolveInternalHandlerWithReply(reply, "null", pageContext);
+    }
+    if (pageContext != nullptr) {
+      g_object_unref(pageContext);
     }
 
     gtk_widget_destroy(active_date_dialog_);
@@ -5663,7 +5707,8 @@ void InAppWebView::updateCursorFromCssStyle(const std::string& cursor_style) {
 // === JavaScript Bridge ===
 
 bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
-                                                WebKitScriptMessageReply* reply) {
+                                                WebKitScriptMessageReply* reply,
+                                                JSCContext* pageContext) {
   // === Security Check 1: javaScriptBridgeEnabled ===
   if (settings_ && !settings_->javaScriptBridgeEnabled) {
     return false;
@@ -5803,7 +5848,7 @@ bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
     if (targetWebView->channel_delegate_) {
       targetWebView->channel_delegate_->onConsoleMessage(message, messageLevel);
     }
-    ResolveInternalHandlerWithReply(reply, "null");
+    ResolveInternalHandlerWithReply(reply, "null", pageContext);
     return true;
   }
 
@@ -5838,7 +5883,7 @@ bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
     if (targetWebView->channel_delegate_) {
       targetWebView->channel_delegate_->onLoadResource(url, initiatorType, startTime, duration);
     }
-    ResolveInternalHandlerWithReply(reply, "null");
+    ResolveInternalHandlerWithReply(reply, "null", pageContext);
     return true;
   }
 
@@ -5892,7 +5937,7 @@ bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
         channel->onMessage(portIndex, messageData.empty() ? nullptr : &messageData, messageType);
       }
     }
-    ResolveInternalHandlerWithReply(reply, "null");
+    ResolveInternalHandlerWithReply(reply, "null", pageContext);
     return true;
   }
 
@@ -5950,21 +5995,21 @@ bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
                                   sourceOriginStr, isMainFrameMsg);
       }
     }
-    ResolveInternalHandlerWithReply(reply, "null");
+    ResolveInternalHandlerWithReply(reply, "null", pageContext);
     return true;
   }
 
   if (handlerName == "onPrintRequest") {
     // Handle print request - currently just acknowledge it
     // Full print implementation would require platform-specific print dialog
-    ResolveInternalHandlerWithReply(reply, "null");
+    ResolveInternalHandlerWithReply(reply, "null", pageContext);
     return true;
   }
 
   if (handlerName == "onFindResultReceived") {
     // Handle find result - this is typically sent by FindInteractionController
     // The find results are already handled via the native find API
-    ResolveInternalHandlerWithReply(reply, "null");
+    ResolveInternalHandlerWithReply(reply, "null", pageContext);
     return true;
   }
 
@@ -5978,7 +6023,7 @@ bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
         }
       } catch (...) {}
     }
-    ResolveInternalHandlerWithReply(reply, "null");
+    ResolveInternalHandlerWithReply(reply, "null", pageContext);
     return true;
   }
 
@@ -6031,6 +6076,12 @@ bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
     }
     pending_color_reply_ = reply;
     webkit_script_message_reply_ref(reply);
+    // 同步期间借用，异步回复时仍需存活：加引用，在回复处释放
+    if (pending_color_context_ != nullptr) {
+      g_object_unref(pending_color_context_);
+    }
+    pending_color_context_ =
+        pageContext != nullptr ? static_cast<JSCContext*>(g_object_ref(pageContext)) : nullptr;
 
     // Get screen position of the cursor
     gint screenX = 0, screenY = 0;
@@ -6101,6 +6152,12 @@ bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
     }
     pending_date_reply_ = reply;
     webkit_script_message_reply_ref(reply);
+    // 同步期间借用，异步回复时仍需存活：加引用，在回复处释放
+    if (pending_date_context_ != nullptr) {
+      g_object_unref(pending_date_context_);
+    }
+    pending_date_context_ =
+        pageContext != nullptr ? static_cast<JSCContext*>(g_object_ref(pageContext)) : nullptr;
 
     // Get screen position of the cursor
     gint screenX = 0, screenY = 0;
@@ -6149,7 +6206,7 @@ bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
     }
 
     // Return false to JS - we handled it natively
-    ResolveInternalHandlerWithReply(reply, "false");
+    ResolveInternalHandlerWithReply(reply, "false", pageContext);
     return true;
   }
 
@@ -6163,9 +6220,12 @@ bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
     // Hold a reference to reply for async callback
     webkit_script_message_reply_ref(reply);
     InAppWebView* capturedTargetWebView = targetWebView;
+    // 页面 context 在 Dart 异步回复期间仍需存活：加引用，在回复处释放
+    JSCContext* capturedPageContext =
+        pageContext != nullptr ? static_cast<JSCContext*>(g_object_ref(pageContext)) : nullptr;
 
-    callback->defaultBehaviour = [capturedTargetWebView,
-                                  reply](const std::optional<FlValue*>& response) {
+    callback->defaultBehaviour = [capturedTargetWebView, reply,
+                                  capturedPageContext](const std::optional<FlValue*>& response) {
       std::string jsonResult = "null";
       if (response.has_value() && response.value() != nullptr) {
         FlValue* val = response.value();
@@ -6173,16 +6233,23 @@ bool InAppWebView::handleScriptMessageWithReply(const std::string& body,
           jsonResult = fl_value_get_string(val);
         }
       }
-      capturedTargetWebView->ResolveInternalHandlerWithReply(reply, jsonResult);
+      capturedTargetWebView->ResolveInternalHandlerWithReply(reply, jsonResult,
+                                                             capturedPageContext);
+      if (capturedPageContext != nullptr) {
+        g_object_unref(capturedPageContext);
+      }
     };
 
-    callback->error = [capturedTargetWebView, reply](const std::string& code,
-                                                     const std::string& message) {
+    callback->error = [capturedTargetWebView, reply,
+                       capturedPageContext](const std::string& code, const std::string& message) {
       std::string errorMessage = code;
       if (!message.empty()) {
         errorMessage += ", " + message;
       }
       capturedTargetWebView->RejectInternalHandlerWithReply(reply, errorMessage);
+      if (capturedPageContext != nullptr) {
+        g_object_unref(capturedPageContext);
+      }
     };
 
     targetWebView->channel_delegate_->onCallJsHandler(handlerName, std::move(data),

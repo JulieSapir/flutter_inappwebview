@@ -28,9 +28,11 @@ using ScriptMessageHandler =
 // Script message handler with reply callback type
 // Receives the message body (JSON string) and a WebKitScriptMessageReply* for async reply
 // The reply object must be ref'd if the callback wants to respond asynchronously
+// 第三个参数是发消息那一帧的 JSCContext*（借用，仅在回调同步执行期间有效）。
+// 回复值必须在它上面构造：用临时 context 建的 JSCValue 交回页面后属性取不到值。
 // Returns true if the message was handled and reply is pending (async), false for sync handling
-using ScriptMessageWithReplyHandler =
-    std::function<bool(const std::string&, WebKitScriptMessageReply*)>;
+using ScriptMessageWithReplyHandler = std::function<bool(
+    const std::string&, WebKitScriptMessageReply*, JSCContext*)>;
 
 class UserContentController {
  public:

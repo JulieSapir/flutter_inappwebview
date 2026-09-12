@@ -324,12 +324,17 @@ class InAppWebView {
 
   // Resolve an internal handler's Promise with a JSON result via WebKitScriptMessageReply
   // Used by color/date picker dialogs to send the result back to JavaScript (works for iframes)
+  // pageContext：发消息那一帧的 JSCContext，回复值必须在它上面构造。
+  // 跨 context 交回页面的 JSCValue 只能读到 key，读属性全为 undefined（实测），
+  // 对象类返回值会整体丢失。传 nullptr 时退回临时 context（仅适用于同步原始值）。
   void ResolveInternalHandlerWithReply(WebKitScriptMessageReply* reply,
-                                       const std::string& jsonResult);
+                                       const std::string& jsonResult,
+                                       JSCContext* pageContext = nullptr);
 
   // JavaScript bridge handler using with_reply API (enables iframe support)
   // Returns true if handled, false otherwise
-  bool handleScriptMessageWithReply(const std::string& body, WebKitScriptMessageReply* reply);
+  bool handleScriptMessageWithReply(const std::string& body, WebKitScriptMessageReply* reply,
+                                    JSCContext* pageContext);
 
   // Reject an internal handler's Promise with an error message via WebKitScriptMessageReply
   void RejectInternalHandlerWithReply(WebKitScriptMessageReply* reply,
@@ -624,6 +629,7 @@ class InAppWebView {
   bool active_color_alpha_enabled_ = false;   // Alpha enabled for active dialog
   int64_t color_dialog_show_time_ = 0;  // Time when dialog was shown (to prevent immediate close)
   WebKitScriptMessageReply* pending_color_reply_ = nullptr;  // WebKit reply for Promise resolution
+  JSCContext* pending_color_context_ = nullptr;  // 对应 reply 的页面 JSCContext（已持有引用）
 
   // Date picker state (for <input type="date/time/etc.> support in WPE)
   // Public because accessed from C-style GTK callback
@@ -634,6 +640,7 @@ class InAppWebView {
   GtkWidget* active_date_dialog_ = nullptr;  // Active date picker dialog
   int64_t date_dialog_show_time_ = 0;        // Time when dialog was shown
   WebKitScriptMessageReply* pending_date_reply_ = nullptr;  // WebKit reply for Promise resolution
+  JSCContext* pending_date_context_ = nullptr;  // 对应 reply 的页面 JSCContext（已持有引用）
 
   // File chooser state (for <input type="file"> support)
   // Public because accessed from C-style GTK callback

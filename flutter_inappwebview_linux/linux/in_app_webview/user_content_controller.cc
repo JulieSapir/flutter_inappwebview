@@ -426,7 +426,7 @@ gboolean UserContentController::onScriptMessageWithReplyReceived(WebKitUserConte
 
       auto it = self->script_message_with_reply_handlers_.find(handlerName);
       if (it != self->script_message_with_reply_handlers_.end()) {
-        bool handled = it->second(jsonBody, reply);
+        bool handled = it->second(jsonBody, reply, jscContext);
         return handled ? TRUE : FALSE;
       }
     }
@@ -438,7 +438,7 @@ gboolean UserContentController::onScriptMessageWithReplyReceived(WebKitUserConte
   // This is the primary path for the JavaScript bridge
   auto callHandlerIt = self->script_message_with_reply_handlers_.find("callHandler");
   if (callHandlerIt != self->script_message_with_reply_handlers_.end()) {
-    bool handled = callHandlerIt->second(jsonBody, reply);
+    bool handled = callHandlerIt->second(jsonBody, reply, jscContext);
     return handled ? TRUE : FALSE;
   }
 
